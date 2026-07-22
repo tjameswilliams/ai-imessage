@@ -11,11 +11,11 @@ default).
 
 ## Status
 
-Early development. Milestone 2 of 8 (incremental ETL) is complete:
+Early development. Milestone 3 of 8 (keyword search) is complete:
 
 - [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
 - [x] **M2** Normalized destination database, incremental ETL
-- [ ] **M3** Conversation chunking + FTS5 keyword search
+- [x] **M3** Conversation chunking + FTS5 keyword search
 - [ ] **M4** Local embeddings + vector search
 - [ ] **M5** Hybrid retrieval (rank fusion)
 - [ ] **M6** MCP server
@@ -29,6 +29,7 @@ cargo build --release
 ./target/release/ai-imessage doctor          # diagnose access & permissions
 ./target/release/ai-imessage etl --dry-run   # count what's readable, write nothing
 ./target/release/ai-imessage etl             # sync messages into the local index
+./target/release/ai-imessage search pizza    # keyword search over your history
 ```
 
 `doctor` will walk you through granting Full Disk Access, which macOS
@@ -41,6 +42,7 @@ requires for any app reading `~/Library/Messages/chat.db`.
 | `ai-imessage doctor` | Check platform, permissions, config, and SQLite features |
 | `ai-imessage etl` | Incremental sync into the local index (first run ingests everything; later runs rescan only the recent tail to catch edits/retractions). `--rebuild` starts over |
 | `ai-imessage etl --dry-run` | Read-only scan: message/chat counts, time range. No bodies printed unless `--debug-show-text N` is passed explicitly |
+| `ai-imessage search <terms>` | FTS5 keyword search over conversation chunks; prints matching snippets (`--limit N`) |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 

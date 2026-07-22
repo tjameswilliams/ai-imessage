@@ -7,6 +7,7 @@
 //! - Schema changes bump `user_version`; an index with a newer version than
 //!   this binary understands is refused, never silently migrated down.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,10 +15,13 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, Transaction, params};
 
+use crate::chunk::{ChunkInput, ChunkParams, chunk_messages};
 use crate::model::ExtractedMessage;
 
 /// Current destination schema version, stored in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i32 = 1;
+/// Additive changes only so far: opening a v1 index under v2 creates the
+/// missing tables in place.
+pub const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -54,6 +58,19 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_chat_sent ON messages(chat_id, sent_at_ms);
 CREATE INDEX IF NOT EXISTS messages_source_rowid ON messages(source_rowid);
+CREATE TABLE IF NOT EXISTS chunks (
+  id            INTEGER PRIMARY KEY,
+  chat_id       INTEGER NOT NULL REFERENCES chats(id),
+  seq           INTEGER NOT NULL,   -- position within the chat
+  started_at_ms INTEGER,
+  ended_at_ms   INTEGER,
+  message_count INTEGER NOT NULL,
+  text          TEXT NOT NULL,
+  content_hash  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chunks_chat ON chunks(chat_id, seq);
+CREATE INDEX IF NOT EXISTS chunks_hash ON chunks(content_hash);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text);
 ";
 
 const WATERMARK_KEY: &str = "source_watermark_rowid";
@@ -97,6 +114,29 @@ pub enum Upsert {
     Inserted,
     Updated,
     Unchanged,
+}
+
+/// One keyword-search result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub chunk_id: i64,
+    /// Chat display name, or a participant handle, or the chat GUID.
+    pub chat_label: String,
+    pub started_at_ms: Option<i64>,
+    pub ended_at_ms: Option<i64>,
+    pub message_count: i64,
+    /// FTS5 snippet with matches wrapped in «guillemets».
+    pub snippet: String,
+}
+
+/// Quote every whitespace-separated term so user input is always a valid
+/// FTS5 query (terms AND together; operators lose their meaning).
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A read-write connection to the destination index.
@@ -179,6 +219,53 @@ impl IndexDb {
         self.count("handles")
     }
 
+    pub fn chunk_count(&self) -> Result<u64, IndexError> {
+        self.count("chunks")
+    }
+
+    /// FTS5 keyword search over conversation chunks, best match first.
+    /// The user query is sanitized into quoted terms (implicit AND), so
+    /// FTS5 operator syntax can never cause an error.
+    pub fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, IndexError> {
+        let fts_query = sanitize_fts_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT
+               c.id,
+               COALESCE(
+                 NULLIF(ch.display_name, ''),  -- Messages stores '' not NULL
+                 (SELECT h.handle FROM messages m JOIN handles h ON h.id = m.sender_id
+                   WHERE m.chat_id = ch.id LIMIT 1),
+                 ch.guid
+               ),
+               c.started_at_ms,
+               c.ended_at_ms,
+               c.message_count,
+               snippet(chunks_fts, 0, '«', '»', ' … ', 24)
+             FROM chunks_fts
+             JOIN chunks c ON c.id = chunks_fts.rowid
+             JOIN chats ch ON ch.id = c.chat_id
+             WHERE chunks_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let hits = stmt
+            .query_map(params![fts_query, limit], |r| {
+                Ok(SearchHit {
+                    chunk_id: r.get(0)?,
+                    chat_label: r.get(1)?,
+                    started_at_ms: r.get(2)?,
+                    ended_at_ms: r.get(3)?,
+                    message_count: r.get(4)?,
+                    snippet: r.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(hits)
+    }
+
     fn count(&self, table: &str) -> Result<u64, IndexError> {
         // Table names are compile-time constants, never user input.
         let n: i64 = self
@@ -192,7 +279,9 @@ impl IndexDb {
     pub fn reset(&mut self) -> Result<(), IndexError> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
-            "DELETE FROM messages;
+            "DELETE FROM chunks_fts;
+             DELETE FROM chunks;
+             DELETE FROM messages;
              DELETE FROM chats;
              DELETE FROM handles;
              DELETE FROM meta;",
@@ -352,6 +441,109 @@ impl<'tx> Writer<'tx> {
                 Ok(Upsert::Updated)
             }
         }
+    }
+
+    pub fn all_chat_ids(&self) -> Result<Vec<i64>, IndexError> {
+        let mut stmt = self.tx.prepare_cached("SELECT id FROM chats")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Rebuild the chunks of one chat from its indexed messages, reusing
+    /// rows whose content hash is unchanged so downstream layers keyed on
+    /// chunk identity (embeddings) are not invalidated by appends.
+    ///
+    /// Returns (kept, inserted, deleted) chunk counts.
+    pub fn rechunk_chat(
+        &self,
+        chat_id: i64,
+        params_: &ChunkParams,
+    ) -> Result<(u64, u64, u64), IndexError> {
+        let mut load = self.tx.prepare_cached(
+            "SELECT
+               CASE WHEN m.is_from_me THEN 'Me' ELSE COALESCE(h.handle, 'unknown') END,
+               m.text,
+               m.sent_at_ms
+             FROM messages m
+             LEFT JOIN handles h ON h.id = m.sender_id
+             WHERE m.chat_id = ?1
+               AND m.text IS NOT NULL
+               AND m.is_system_event = 0
+             ORDER BY COALESCE(m.sent_at_ms, 0), m.id",
+        )?;
+        let msgs: Vec<ChunkInput> = load
+            .query_map([chat_id], |r| {
+                Ok(ChunkInput {
+                    sender: r.get(0)?,
+                    text: r.get(1)?,
+                    sent_at_ms: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let new_chunks = chunk_messages(&chat_id.to_string(), &msgs, params_);
+
+        // Existing chunks by content hash; matches keep their row (and id).
+        let mut find = self
+            .tx
+            .prepare_cached("SELECT id, content_hash FROM chunks WHERE chat_id = ?1")?;
+        let mut existing: HashMap<String, Vec<i64>> = HashMap::new();
+        for row in find.query_map([chat_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (id, hash) = row?;
+            existing.entry(hash).or_default().push(id);
+        }
+
+        let (mut kept, mut inserted) = (0u64, 0u64);
+        for (seq, c) in new_chunks.iter().enumerate() {
+            let seq = seq as i64;
+            match existing.get_mut(&c.content_hash).and_then(Vec::pop) {
+                Some(id) => {
+                    self.tx
+                        .prepare_cached("UPDATE chunks SET seq = ?2 WHERE id = ?1")?
+                        .execute(params![id, seq])?;
+                    kept += 1;
+                }
+                None => {
+                    self.tx
+                        .prepare_cached(
+                            "INSERT INTO chunks
+                               (chat_id, seq, started_at_ms, ended_at_ms,
+                                message_count, text, content_hash)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        )?
+                        .execute(params![
+                            chat_id,
+                            seq,
+                            c.started_at_ms,
+                            c.ended_at_ms,
+                            c.message_count,
+                            c.text,
+                            c.content_hash,
+                        ])?;
+                    let id = self.tx.last_insert_rowid();
+                    self.tx
+                        .prepare_cached("INSERT INTO chunks_fts (rowid, text) VALUES (?1, ?2)")?
+                        .execute(params![id, c.text])?;
+                    inserted += 1;
+                }
+            }
+        }
+
+        let mut deleted = 0u64;
+        for id in existing.into_values().flatten() {
+            self.tx
+                .prepare_cached("DELETE FROM chunks WHERE id = ?1")?
+                .execute([id])?;
+            self.tx
+                .prepare_cached("DELETE FROM chunks_fts WHERE rowid = ?1")?
+                .execute([id])?;
+            deleted += 1;
+        }
+        Ok((kept, inserted, deleted))
     }
 
     pub fn set_watermark(&self, rowid: i64) -> Result<(), IndexError> {

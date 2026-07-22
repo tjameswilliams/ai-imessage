@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+use crate::chunk::ChunkParams;
 use crate::config::{self, LoadedConfig};
 use crate::doctor;
 use crate::dryrun;
@@ -39,6 +40,8 @@ pub enum Command {
     Doctor,
     /// Extract, transform, and load messages into the local index
     Etl(EtlArgs),
+    /// Keyword search over the indexed history (prints message content)
+    Search(SearchArgs),
     /// Inspect configuration
     Config {
         #[command(subcommand)]
@@ -62,6 +65,17 @@ pub struct EtlArgs {
     pub rebuild: bool,
 }
 
+#[derive(Args)]
+pub struct SearchArgs {
+    /// Search terms (matched as keywords, best conversation chunks first)
+    #[arg(required = true)]
+    pub query: Vec<String>,
+
+    /// Maximum number of results (default: retrieval.result_limit)
+    #[arg(long, value_name = "N")]
+    pub limit: Option<u32>,
+}
+
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Print the effective configuration (secrets redacted)
@@ -78,6 +92,7 @@ pub fn run() -> Result<ExitCode> {
     match cli.command {
         Command::Doctor => run_doctor(&loaded),
         Command::Etl(args) => run_etl(&loaded, &args),
+        Command::Search(args) => run_search(&loaded, &args),
         Command::Config { command } => run_config(&loaded, &command),
     }
 }
@@ -116,9 +131,67 @@ fn run_etl(loaded: &LoadedConfig, args: &EtlArgs) -> Result<ExitCode> {
     if args.rebuild {
         index.reset()?;
     }
-    let report = etl::sync(&db, &mut index, loaded.config.source.recent_overlap_rows)?;
+    let report = etl::sync(
+        &db,
+        &mut index,
+        loaded.config.source.recent_overlap_rows,
+        &chunk_params(loaded),
+    )?;
     println!("{report}");
     Ok(ExitCode::SUCCESS)
+}
+
+fn chunk_params(loaded: &LoadedConfig) -> ChunkParams {
+    ChunkParams {
+        gap_minutes: loaded.config.index.chunk_gap_minutes,
+        target_tokens: loaded.config.index.chunk_target_tokens,
+        overlap_messages: loaded.config.index.chunk_overlap_messages,
+    }
+}
+
+fn run_search(loaded: &LoadedConfig, args: &SearchArgs) -> Result<ExitCode> {
+    let index_path = loaded.config.index_db_path()?;
+    if !index_path.exists() {
+        anyhow::bail!(
+            "no index at {} — run `ai-imessage etl` first",
+            index_path.display()
+        );
+    }
+    let index = IndexDb::open(&index_path)?;
+    let query = args.query.join(" ");
+    let limit = args.limit.unwrap_or(loaded.config.retrieval.result_limit);
+    let hits = index.search(&query, limit)?;
+
+    if hits.is_empty() {
+        println!("No matches for \"{query}\".");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("{} result(s) for \"{query}\"\n", hits.len());
+    for (i, h) in hits.iter().enumerate() {
+        println!(
+            "{}. {} — {} ({} messages)",
+            i + 1,
+            h.chat_label,
+            format_range(h.started_at_ms, h.ended_at_ms),
+            h.message_count
+        );
+        println!("   {}\n", h.snippet.replace('\n', "\n   "));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn format_range(start_ms: Option<i64>, end_ms: Option<i64>) -> String {
+    let day = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "?".into())
+    };
+    match (start_ms, end_ms) {
+        (Some(s), Some(e)) if day(s) == day(e) => day(s),
+        (Some(s), Some(e)) => format!("{} → {}", day(s), day(e)),
+        (Some(s), None) | (None, Some(s)) => day(s),
+        (None, None) => "unknown date".into(),
+    }
 }
 
 fn run_config(loaded: &LoadedConfig, command: &ConfigCommand) -> Result<ExitCode> {

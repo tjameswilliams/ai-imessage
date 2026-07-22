@@ -6,11 +6,12 @@
 //! `watermark - overlap` and upserts by GUID; the content hash decides
 //! whether an already-known message actually changed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::Serialize;
 
+use crate::chunk::ChunkParams;
 use crate::extract::{SourceDb, SourceError};
 use crate::index::{IndexDb, IndexError, Upsert, Writer};
 
@@ -31,14 +32,22 @@ pub struct SyncReport {
     pub unchanged: u64,
     pub watermark_before: i64,
     pub watermark_after: i64,
+    pub rechunked_chats: u64,
     pub total_messages: u64,
     pub total_chats: u64,
     pub total_handles: u64,
+    pub total_chunks: u64,
 }
 
-/// Run one sync pass. All writes happen in a single transaction: a failed
-/// run leaves the index exactly as the previous run did.
-pub fn sync(source: &SourceDb, index: &mut IndexDb, overlap: u32) -> Result<SyncReport, EtlError> {
+/// Run one sync pass: upsert messages, then re-chunk every chat this run
+/// touched. All writes happen in a single transaction: a failed run leaves
+/// the index exactly as the previous run did.
+pub fn sync(
+    source: &SourceDb,
+    index: &mut IndexDb,
+    overlap: u32,
+    chunking: &ChunkParams,
+) -> Result<SyncReport, EtlError> {
     let mut r = SyncReport {
         index_path: index.path().display().to_string(),
         watermark_before: index.watermark()?,
@@ -47,11 +56,19 @@ pub fn sync(source: &SourceDb, index: &mut IndexDb, overlap: u32) -> Result<Sync
     let start = (r.watermark_before - i64::from(overlap)).max(0);
     r.watermark_after = r.watermark_before;
 
+    // An index synced before chunking existed (or whose chunks were wiped)
+    // has messages but no chunks: give every chat a first chunking pass.
+    let bootstrap_chunking = index.chunk_count()? == 0 && index.message_count()? > 0;
+
     let tx = index.transaction()?;
     {
         let writer = Writer::new(&tx);
         let mut chat_ids: HashMap<String, i64> = HashMap::new();
         let mut handle_ids: HashMap<String, i64> = HashMap::new();
+        let mut dirty_chats: HashSet<i64> = HashSet::new();
+        if bootstrap_chunking {
+            dirty_chats.extend(writer.all_chat_ids()?);
+        }
         // scan_messages takes an infallible callback; the first write error
         // is parked here and turns the rest of the scan into a no-op.
         let mut failure: Option<EtlError> = None;
@@ -60,7 +77,7 @@ pub fn sync(source: &SourceDb, index: &mut IndexDb, overlap: u32) -> Result<Sync
             if failure.is_some() {
                 return;
             }
-            let outcome = (|| -> Result<Upsert, EtlError> {
+            let outcome = (|| -> Result<(Upsert, Option<i64>), EtlError> {
                 let chat_id = match &m.chat_guid {
                     Some(guid) => Some(match chat_ids.get(guid) {
                         Some(&id) => id,
@@ -87,13 +104,20 @@ pub fn sync(source: &SourceDb, index: &mut IndexDb, overlap: u32) -> Result<Sync
                     }),
                     _ => None,
                 };
-                Ok(writer.upsert_message(&m, chat_id, sender_id)?)
+                Ok((writer.upsert_message(&m, chat_id, sender_id)?, chat_id))
             })();
 
             match outcome {
-                Ok(Upsert::Inserted) => r.inserted += 1,
-                Ok(Upsert::Updated) => r.updated += 1,
-                Ok(Upsert::Unchanged) => r.unchanged += 1,
+                Ok((changed @ (Upsert::Inserted | Upsert::Updated), chat_id)) => {
+                    match changed {
+                        Upsert::Inserted => r.inserted += 1,
+                        _ => r.updated += 1,
+                    }
+                    if let Some(id) = chat_id {
+                        dirty_chats.insert(id);
+                    }
+                }
+                Ok((Upsert::Unchanged, _)) => r.unchanged += 1,
                 Err(e) => {
                     failure = Some(e);
                     return;
@@ -106,6 +130,10 @@ pub fn sync(source: &SourceDb, index: &mut IndexDb, overlap: u32) -> Result<Sync
         if let Some(e) = failure {
             return Err(e); // tx drops without commit: full rollback
         }
+        for chat_id in dirty_chats {
+            writer.rechunk_chat(chat_id, chunking)?;
+            r.rechunked_chats += 1;
+        }
         writer.set_watermark(r.watermark_after)?;
     }
     tx.commit().map_err(IndexError::from)?;
@@ -113,6 +141,7 @@ pub fn sync(source: &SourceDb, index: &mut IndexDb, overlap: u32) -> Result<Sync
     r.total_messages = index.message_count()?;
     r.total_chats = index.chat_count()?;
     r.total_handles = index.handle_count()?;
+    r.total_chunks = index.chunk_count()?;
     Ok(r)
 }
 
@@ -129,11 +158,13 @@ impl fmt::Display for SyncReport {
         writeln!(f, "  Inserted:  {}", self.inserted)?;
         writeln!(f, "  Updated:   {}", self.updated)?;
         writeln!(f, "  Unchanged: {}", self.unchanged)?;
+        writeln!(f, "  Rechunked: {} chats", self.rechunked_chats)?;
         writeln!(f)?;
         writeln!(f, "Index totals")?;
         writeln!(f, "  Messages:  {}", self.total_messages)?;
         writeln!(f, "  Chats:     {}", self.total_chats)?;
         writeln!(f, "  Handles:   {}", self.total_handles)?;
+        writeln!(f, "  Chunks:    {}", self.total_chunks)?;
         write!(f, "  Watermark: source ROWID {}", self.watermark_after)
     }
 }

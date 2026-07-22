@@ -135,6 +135,49 @@ fn etl_ingests_into_the_index_without_printing_bodies() {
 }
 
 #[test]
+fn search_returns_matches_after_etl() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl"])
+        .assert()
+        .success();
+
+    cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "search",
+            "SECRET",
+            "BODY",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("«SECRET» «BODY»").and(predicate::str::contains("2026-07-01")),
+        );
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "search", "zanzibar"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No matches"));
+}
+
+#[test]
+fn search_without_an_index_says_to_run_etl() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "search", "anything"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run `ai-imessage etl` first"));
+}
+
+#[test]
 fn etl_rebuild_conflicts_with_dry_run() {
     cmd()
         .args(["etl", "--dry-run", "--rebuild"])
