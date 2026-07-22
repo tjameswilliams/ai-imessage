@@ -14,6 +14,7 @@ use crate::embed;
 use crate::etl;
 use crate::extract::SourceDb;
 use crate::index::IndexDb;
+use crate::retrieve;
 
 #[derive(Parser)]
 #[command(
@@ -80,9 +81,13 @@ pub struct SearchArgs {
     #[arg(long, value_name = "N")]
     pub limit: Option<u32>,
 
-    /// Semantic (embedding) search instead of keyword match
-    #[arg(long)]
+    /// Semantic (embedding) search only, skipping keyword match
+    #[arg(long, conflicts_with = "keyword")]
     pub semantic: bool,
+
+    /// Keyword (FTS5) search only, skipping embeddings
+    #[arg(long)]
+    pub keyword: bool,
 }
 
 #[derive(Subcommand)]
@@ -188,8 +193,23 @@ fn run_search(loaded: &LoadedConfig, args: &SearchArgs) -> Result<ExitCode> {
         let mut embedder = embed::make_embedder(&loaded.config, &model_cache_dir(loaded)?)?;
         let query_vec = embedder.embed_query(&query)?;
         index.vector_search(&query_vec, limit)?
-    } else {
+    } else if args.keyword {
         index.search(&query, limit)?
+    } else {
+        // Default: hybrid. Without embeddings (etl --no-embed), the vector
+        // half contributes nothing and this is plain keyword ranking.
+        let query_vec = if index.embedding_count()? > 0 {
+            let mut embedder = embed::make_embedder(&loaded.config, &model_cache_dir(loaded)?)?;
+            Some(embedder.embed_query(&query)?)
+        } else {
+            None
+        };
+        let params = retrieve::RetrievalParams {
+            fts_candidates: loaded.config.retrieval.fts_candidates,
+            vector_candidates: loaded.config.retrieval.vector_candidates,
+            limit,
+        };
+        retrieve::hybrid_search(&index, &query, query_vec.as_deref(), &params)?
     };
 
     if hits.is_empty() {

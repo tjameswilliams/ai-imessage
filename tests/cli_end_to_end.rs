@@ -205,6 +205,51 @@ fn etl_no_embed_skips_the_embedding_stage() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Embeddings").not());
+
+    // Default (hybrid) search still works without embeddings.
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "search", "SECRET"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("«SECRET»"));
+}
+
+#[test]
+fn default_search_is_hybrid_and_mode_flags_narrow_it() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl"])
+        .assert()
+        .success();
+
+    // Hybrid: keyword snippet style, no similarity score shown.
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "search", "SECRET"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("«SECRET»").and(predicate::str::contains("similarity").not()),
+        );
+
+    // Keyword-only flag works; --semantic conflicts with --keyword.
+    cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "search",
+            "--keyword",
+            "SECRET",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("«SECRET»"));
+    cmd()
+        .args(["search", "--keyword", "--semantic", "x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

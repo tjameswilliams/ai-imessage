@@ -18,4 +18,5 @@ pub mod handles;
 pub mod index;
 pub mod model;
 pub mod paths;
+pub mod retrieve;
 pub mod typedstream;

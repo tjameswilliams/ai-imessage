@@ -11,13 +11,13 @@ default).
 
 ## Status
 
-Early development. Milestone 4 of 8 (semantic search) is complete:
+Early development. Milestone 5 of 8 (hybrid retrieval) is complete:
 
 - [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
 - [x] **M2** Normalized destination database, incremental ETL
 - [x] **M3** Conversation chunking + FTS5 keyword search
 - [x] **M4** Local embeddings + vector search
-- [ ] **M5** Hybrid retrieval (rank fusion)
+- [x] **M5** Hybrid retrieval (rank fusion)
 - [ ] **M6** MCP server
 - [ ] **M7** Scheduled ETL (LaunchAgent)
 - [ ] **M8** Homebrew release
@@ -43,8 +43,9 @@ requires for any app reading `~/Library/Messages/chat.db`.
 | `ai-imessage doctor` | Check platform, permissions, config, and SQLite features |
 | `ai-imessage etl` | Incremental sync into the local index (first run ingests everything; later runs rescan only the recent tail to catch edits/retractions). `--rebuild` starts over |
 | `ai-imessage etl --dry-run` | Read-only scan: message/chat counts, time range. No bodies printed unless `--debug-show-text N` is passed explicitly |
-| `ai-imessage search <terms>` | FTS5 keyword search over conversation chunks; prints matching snippets (`--limit N`) |
-| `ai-imessage search --semantic <terms>` | Embedding-based similarity search (`etl` must have run the embedding stage) |
+| `ai-imessage search <terms>` | Hybrid search (keyword + semantic, fused by reciprocal rank) over conversation chunks; prints matching snippets (`--limit N`). Falls back to keyword-only when no embeddings exist |
+| `ai-imessage search --keyword <terms>` | FTS5 keyword match only |
+| `ai-imessage search --semantic <terms>` | Embedding similarity only |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 

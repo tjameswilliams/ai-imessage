@@ -161,6 +161,43 @@ fn edits_reembed_only_the_affected_chunk_and_prune_the_stale_vector() {
 }
 
 #[test]
+fn hybrid_search_ranks_agreement_first_and_degrades_without_embeddings() {
+    use ai_imessage::retrieve::{RetrievalParams, hybrid_search};
+
+    let w = World::new();
+    populate(&w);
+    w.sync();
+
+    let params = RetrievalParams {
+        fts_candidates: 30,
+        vector_candidates: 30,
+        limit: 10,
+    };
+
+    // No embeddings yet: hybrid works as pure keyword search.
+    let index = IndexDb::open(&w.index_path).unwrap();
+    let hits = hybrid_search(&index, "pizza dinner", None, &params).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].snippet.contains("«pizza»"));
+    drop(index);
+
+    w.embed();
+    let index = IndexDb::open(&w.index_path).unwrap();
+    let mut embedder = make_embedder(&debug_config(), w.fixture.dir.path()).unwrap();
+    let q = embedder.embed_query("pizza dinner").unwrap();
+
+    // Both branches agree on the pizza chunk: it must lead the fused list,
+    // keeping the keyword snippet's «highlights».
+    let hits = hybrid_search(&index, "pizza dinner", Some(&q), &params).unwrap();
+    assert!(
+        hits.len() >= 2,
+        "vector branch surfaces the other chunk too"
+    );
+    assert!(hits[0].snippet.contains("«pizza»"));
+    assert_eq!(hits[0].score, None);
+}
+
+#[test]
 fn switching_models_wipes_and_rebuilds_embeddings() {
     let w = World::new();
     populate(&w);

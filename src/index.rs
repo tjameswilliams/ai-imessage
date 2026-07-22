@@ -355,6 +355,9 @@ impl IndexDb {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Orthogonal or opposed vectors share no signal with the query;
+        // "nearest" among those is noise, not a result.
+        hits.retain(|(score, _)| *score > 0.0);
         hits.sort_by(|a, b| b.0.total_cmp(&a.0));
         hits.truncate(limit as usize);
         Ok(hits
