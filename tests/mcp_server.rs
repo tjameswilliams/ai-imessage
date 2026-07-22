@@ -174,6 +174,126 @@ fn list_chats_orders_by_recency_and_filters() {
     assert!(!text.contains("+15550100001"));
 }
 
+/// A contact with an OLD direct conversation and NEWER activity elsewhere:
+/// the exact shape that made relevance-ranked search misreport "when did I
+/// last talk to her".
+fn recency_server() -> (Fixture, McpServer) {
+    let f = Fixture::new(SchemaVariant::Modern);
+    let jaina = f.add_handle("+19165550142");
+    let other = f.add_handle("+14155550107");
+    let direct = f.add_chat("direct-jaina", CHAT_STYLE_DIRECT, Some(""));
+    let group = f.add_chat("group-trip", CHAT_STYLE_GROUP, Some("Trip Crew"));
+    let noise = f.add_chat("direct-other", CHAT_STYLE_DIRECT, Some(""));
+
+    // An old, keyword-rich direct conversation (what search would find).
+    let m1 = f.add_message(&MessageSpec {
+        guid: "r1",
+        text: Some("happy birthday!! hope the party is great"),
+        handle_id: Some(jaina),
+        date: apple_ns("2025-07-10T18:00:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(direct, m1);
+
+    // Her latest message lives in a group chat...
+    let m2 = f.add_message(&MessageSpec {
+        guid: "r2",
+        text: Some("flights are booked!"),
+        handle_id: Some(jaina),
+        date: apple_ns("2026-05-24T09:00:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(group, m2);
+
+    // ...and the very last exchange is a from-me message in that group.
+    let m3 = f.add_message(&MessageSpec {
+        guid: "r3",
+        text: Some("amazing, can't wait"),
+        is_from_me: true,
+        date: apple_ns("2026-05-25T10:30:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(group, m3);
+
+    // Unrelated newer traffic that must NOT leak into Jaina's scope.
+    let m4 = f.add_message(&MessageSpec {
+        guid: "r4",
+        text: Some("totally unrelated chatter"),
+        handle_id: Some(other),
+        date: apple_ns("2026-07-01T12:00:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(noise, m4);
+
+    let contacts = common::build_contacts_dir(
+        f.dir.path(),
+        &[
+            ("Jaina", "Proudmoore", "", &["(916) 555-0142"], &[]),
+            ("Somebody", "Else", "", &["(415) 555-0107"], &[]),
+        ],
+    );
+    let book = ai_imessage::contacts::ContactBook::load(&contacts).unwrap();
+
+    let index_path = f.dir.path().join("index.sqlite");
+    let source = SourceDb::open(&f.db_path).unwrap();
+    let mut index = IndexDb::open(&index_path).unwrap();
+    sync(&source, &mut index, 100, &CHUNKING, Some(&book)).unwrap();
+    let mut embedder = make_embedder(&debug_config(), f.dir.path()).unwrap();
+    ai_imessage::etl::embed_missing(&mut index, embedder.as_mut(), |_, _| {}).unwrap();
+
+    let server = McpServer::new(IndexDb::open(&index_path).unwrap(), debug_config());
+    (f, server)
+}
+
+#[test]
+fn recent_messages_reports_the_true_last_contact_across_chats() {
+    let (_f, mut s) = recency_server();
+    let result = call(&mut s, "get_recent_messages", json!({"contact": "Jaina"}));
+    assert_eq!(result["isError"], false);
+    let text = text_of(&result);
+
+    // The headline answer is her real last activity — the from-me group
+    // message — not the old direct conversation.
+    assert!(text.contains("Contact: Jaina Proudmoore"), "{text}");
+    assert!(
+        text.contains("Most recent message: [2026-05-25 10:30]"),
+        "{text}"
+    );
+    // Both her chats appear; unrelated chats do not.
+    assert!(text.contains("flights are booked!"));
+    assert!(text.contains("Me: amazing, can't wait"));
+    assert!(text.contains("happy birthday"));
+    assert!(!text.contains("unrelated chatter"));
+    // Oldest-to-newest ordering for readability.
+    let birthday = text.find("happy birthday").unwrap();
+    let latest = text.find("amazing, can't wait").unwrap();
+    assert!(birthday < latest);
+}
+
+#[test]
+fn recent_messages_scopes_by_chat_and_handles_unknowns() {
+    let (_f, mut s) = recency_server();
+
+    let text = text_of(&call(
+        &mut s,
+        "get_recent_messages",
+        json!({"chat": "Trip Crew", "limit": 10}),
+    ));
+    assert!(text.contains("flights are booked!"));
+    assert!(!text.contains("happy birthday"));
+
+    let text = text_of(&call(
+        &mut s,
+        "get_recent_messages",
+        json!({"contact": "Thrall"}),
+    ));
+    assert!(text.contains("No contact or handle matching"));
+
+    // No scope at all: newest message in the whole index leads.
+    let text = text_of(&call(&mut s, "get_recent_messages", json!({"limit": 2})));
+    assert!(text.contains("unrelated chatter"));
+}
+
 #[test]
 fn full_handshake_then_tool_call_round_trip() {
     let (_f, mut s) = server();

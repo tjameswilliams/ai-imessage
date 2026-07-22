@@ -76,9 +76,13 @@ impl McpServer {
                 "version": env!("CARGO_PKG_VERSION"),
             },
             "instructions": "Read-only search over the local Apple Messages \
-                index. Use search_messages to find conversations, \
-                get_conversation to expand a chunk with surrounding context, \
-                and list_chats to browse chats.",
+                index. Use search_messages to find conversations by topic, \
+                get_recent_messages for recency questions (when someone last \
+                talked, what was said most recently, catching up on a chat), \
+                get_conversation to expand a search hit with surrounding \
+                context, and list_chats to browse chats. search_messages \
+                ranks by relevance, NOT date — never use it to answer \
+                'when' or 'most recent' questions.",
         })
     }
 
@@ -87,6 +91,7 @@ impl McpServer {
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
         let outcome = match name {
             "search_messages" => self.tool_search(&args),
+            "get_recent_messages" => self.tool_recent_messages(&args),
             "get_conversation" => self.tool_conversation(&args),
             "list_chats" => self.tool_list_chats(&args),
             other => return rpc_error(id, -32602, &format!("unknown tool: {other}")),
@@ -160,6 +165,86 @@ impl McpServer {
                 format_range(h.started_at_ms, h.ended_at_ms),
                 h.message_count,
                 text,
+            ));
+        }
+        Ok(out)
+    }
+
+    fn tool_recent_messages(&mut self, args: &Value) -> Result<String> {
+        let contact = args
+            .get("contact")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let chat = args
+            .get("chat")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|n| n.clamp(1, 200) as u32)
+            .unwrap_or(25);
+
+        let mut header = String::new();
+        let chat_ids: Option<Vec<i64>> = match (contact, chat) {
+            (Some(who), _) => {
+                let matches = self.index.find_handles(who)?;
+                if matches.is_empty() {
+                    return Ok(format!(
+                        "No contact or handle matching \"{who}\". Try list_chats \
+                         to see who exists in the index."
+                    ));
+                }
+                let mut names: Vec<String> = matches
+                    .iter()
+                    .map(|m| m.display_name.clone().unwrap_or_else(|| m.handle.clone()))
+                    .collect();
+                names.sort();
+                names.dedup();
+                if names.len() > 4 {
+                    return Ok(format!(
+                        "\"{who}\" is ambiguous — it matches {}: {}. Call again \
+                         with a more specific contact.",
+                        names.len(),
+                        names.join(", ")
+                    ));
+                }
+                let handles: Vec<String> = matches.iter().map(|m| m.handle.clone()).collect();
+                header = format!("Contact: {} ({})\n", names.join(", "), handles.join(", "));
+                let ids: Vec<i64> = matches.iter().map(|m| m.id).collect();
+                Some(self.index.chats_for_handles(&ids)?)
+            }
+            (None, Some(label)) => {
+                let ids = self.index.chats_matching_label(label)?;
+                if ids.is_empty() {
+                    return Ok(format!("No chat matching \"{label}\"."));
+                }
+                Some(ids)
+            }
+            (None, None) => None,
+        };
+
+        let mut messages = self.index.recent_messages(chat_ids.as_deref(), limit)?;
+        let Some(latest) = messages.first() else {
+            return Ok("No messages found in that scope.".into());
+        };
+        header.push_str(&format!(
+            "Most recent message: [{}] in \"{}\"\n\nLast {} message(s), oldest to newest:\n",
+            format_ms(Some(latest.sent_at_ms)),
+            latest.chat_label,
+            messages.len(),
+        ));
+        messages.reverse();
+        let mut out = header;
+        for m in &messages {
+            out.push_str(&format!(
+                "[{}] {} • {}: {}\n",
+                format_ms(Some(m.sent_at_ms)),
+                m.chat_label,
+                m.sender,
+                m.text
             ));
         }
         Ok(out)
@@ -364,10 +449,12 @@ fn tool_definitions() -> Value {
     json!([
         {
             "name": "search_messages",
-            "description": "Search the local Apple Messages history. Returns \
-                matching conversation chunks with their chunk ids, chat, date \
-                range, and full text. Default mode fuses keyword and semantic \
-                ranking.",
+            "description": "Search the local Apple Messages history BY TOPIC. \
+                Returns matching conversation chunks with their chunk ids, \
+                chat, date range, and full text, ranked by relevance — NOT by \
+                date. For 'when did…' / 'most recent…' / 'last time…' \
+                questions use get_recent_messages instead. Default mode fuses \
+                keyword and semantic ranking.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -377,6 +464,25 @@ fn tool_definitions() -> Value {
                               "description": "Retrieval mode (default hybrid)" }
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "get_recent_messages",
+            "description": "The chronological tail of conversation, newest \
+                messages across all relevant chats (direct AND groups), \
+                including messages sent by the user. THE tool for: when \
+                someone was last talked to, what was said most recently, \
+                catching up on a person or chat. Scope by contact name, by \
+                chat, or neither (all chats).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "contact": { "type": "string",
+                                 "description": "Contact name or phone/email fragment; covers every chat they are in" },
+                    "chat": { "type": "string",
+                              "description": "Chat name filter (used when contact is not given)" },
+                    "limit": { "type": "integer", "description": "Max messages (default 25, max 200)" }
+                }
             }
         },
         {
@@ -486,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_names_all_three_tools() {
+    fn tools_list_names_all_four_tools() {
         let (_d, mut s) = server();
         let resp = s.handle(&req(2, "tools/list", Value::Null)).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
@@ -497,7 +603,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["search_messages", "get_conversation", "list_chats"]
+            vec![
+                "search_messages",
+                "get_recent_messages",
+                "get_conversation",
+                "list_chats"
+            ]
         );
     }
 
