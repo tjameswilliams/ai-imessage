@@ -97,15 +97,50 @@ fn dry_run_debug_flag_shows_bodies_with_warning() {
 }
 
 #[test]
-fn etl_without_dry_run_fails_with_milestone_note() {
+fn etl_ingests_into_the_index_without_printing_bodies() {
     let f = populated_fixture();
     let config = write_config(&f.db_path, f.dir.path());
 
     cmd()
         .args(["--config", config.to_str().unwrap(), "etl"])
         .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("initial full sync")
+                .and(predicate::str::contains("Inserted:  2"))
+                .and(predicate::str::contains("Messages:  2"))
+                .and(predicate::str::contains("SECRET BODY").not()),
+        );
+
+    // A second run is incremental and changes nothing.
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("incremental")
+                .and(predicate::str::contains("Inserted:  0"))
+                .and(predicate::str::contains("Unchanged: 2")),
+        );
+
+    // --rebuild starts over from an empty index.
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl", "--rebuild"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("initial full sync")
+                .and(predicate::str::contains("Inserted:  2")),
+        );
+}
+
+#[test]
+fn etl_rebuild_conflicts_with_dry_run() {
+    cmd()
+        .args(["etl", "--dry-run", "--rebuild"])
+        .assert()
         .failure()
-        .stderr(predicate::str::contains("Milestone"));
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

@@ -151,6 +151,39 @@ impl Fixture {
         conn.last_insert_rowid()
     }
 
+    /// Simulate an in-place edit (Modern schema): replace the body and set
+    /// `date_edited`, exactly as Messages does when a message is edited.
+    pub fn edit_message(&self, guid: &str, new_attributed_text: &str, date_edited: i64) {
+        assert_eq!(self.variant, SchemaVariant::Modern, "edits are Modern-only");
+        let blob = typedstream::encode_text(new_attributed_text);
+        self.conn()
+            .execute(
+                "UPDATE message
+                   SET text = NULL, attributedBody = ?2, date_edited = ?3
+                 WHERE guid = ?1",
+                params![guid, blob, date_edited],
+            )
+            .expect("edit message");
+    }
+
+    /// Simulate a retraction (unsend): the body is cleared and
+    /// `date_retracted` set.
+    pub fn retract_message(&self, guid: &str, date_retracted: i64) {
+        assert_eq!(
+            self.variant,
+            SchemaVariant::Modern,
+            "retractions are Modern-only"
+        );
+        self.conn()
+            .execute(
+                "UPDATE message
+                   SET text = NULL, attributedBody = NULL, date_retracted = ?2
+                 WHERE guid = ?1",
+                params![guid, date_retracted],
+            )
+            .expect("retract message");
+    }
+
     pub fn link_chat_message(&self, chat_id: i64, message_id: i64) {
         self.conn()
             .execute(

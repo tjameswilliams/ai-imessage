@@ -11,10 +11,10 @@ default).
 
 ## Status
 
-Early development. Milestone 1 of 8 (read-only extraction) is complete:
+Early development. Milestone 2 of 8 (incremental ETL) is complete:
 
 - [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
-- [ ] **M2** Normalized destination database, incremental ETL
+- [x] **M2** Normalized destination database, incremental ETL
 - [ ] **M3** Conversation chunking + FTS5 keyword search
 - [ ] **M4** Local embeddings + vector search
 - [ ] **M5** Hybrid retrieval (rank fusion)
@@ -28,6 +28,7 @@ Early development. Milestone 1 of 8 (read-only extraction) is complete:
 cargo build --release
 ./target/release/ai-imessage doctor          # diagnose access & permissions
 ./target/release/ai-imessage etl --dry-run   # count what's readable, write nothing
+./target/release/ai-imessage etl             # sync messages into the local index
 ```
 
 `doctor` will walk you through granting Full Disk Access, which macOS
@@ -38,6 +39,7 @@ requires for any app reading `~/Library/Messages/chat.db`.
 | Command | Purpose |
 | --- | --- |
 | `ai-imessage doctor` | Check platform, permissions, config, and SQLite features |
+| `ai-imessage etl` | Incremental sync into the local index (first run ingests everything; later runs rescan only the recent tail to catch edits/retractions). `--rebuild` starts over |
 | `ai-imessage etl --dry-run` | Read-only scan: message/chat counts, time range. No bodies printed unless `--debug-show-text N` is passed explicitly |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
@@ -49,6 +51,7 @@ the full schema and defaults.
 ## Privacy
 
 - Source database opened with `SQLITE_OPEN_READONLY` + `PRAGMA query_only`, enforced by tests.
+- The local index (`~/Library/Application Support/ai-imessage/index.sqlite`) contains full message bodies and is created with owner-only permissions (0600, directory 0700).
 - No telemetry, no network calls in the default configuration.
 - Logs and reports never contain message content; `--debug-show-text` is the
   single, explicit, warned exception.

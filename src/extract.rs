@@ -332,6 +332,7 @@ fn row_to_message(row: &Row) -> rusqlite::Result<ExtractedMessage> {
         edited_at: raw_edited.and_then(apple_time_to_utc),
         retracted_at: raw_retracted.and_then(apple_time_to_utc),
         is_tapback: associated_type.is_some_and(|t| (2000..4000).contains(&t)),
+        associated_type: associated_type.filter(|&t| t != 0),
         is_system_event: item_type.is_some_and(|t| t != 0),
     })
 }

@@ -37,6 +37,10 @@ pub struct ExtractedMessage {
     pub retracted_at: Option<DateTime<Utc>>,
     /// True for tapbacks/reactions (associated_message_type 2000–3999).
     pub is_tapback: bool,
+    /// Raw `associated_message_type` from the source, when present and
+    /// non-zero. Distinguishes reaction kinds (2000 loved, 2001 liked, …)
+    /// and removals (3000s).
+    pub associated_type: Option<i64>,
     /// True for non-message items such as group membership changes.
     pub is_system_event: bool,
 }
@@ -98,6 +102,7 @@ mod tests {
             edited_at: None,
             retracted_at: None,
             is_tapback: false,
+            associated_type: None,
             is_system_event: false,
         }
     }

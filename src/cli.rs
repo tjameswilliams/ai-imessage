@@ -3,13 +3,15 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, LoadedConfig};
 use crate::doctor;
 use crate::dryrun;
+use crate::etl;
 use crate::extract::SourceDb;
+use crate::index::IndexDb;
 
 #[derive(Parser)]
 #[command(
@@ -54,6 +56,10 @@ pub struct EtlArgs {
     /// will appear in your terminal and shell history)
     #[arg(long, value_name = "N", requires = "dry_run")]
     pub debug_show_text: Option<usize>,
+
+    /// Discard the existing index and re-ingest everything from scratch
+    #[arg(long, conflicts_with = "dry_run")]
+    pub rebuild: bool,
 }
 
 #[derive(Subcommand)]
@@ -87,26 +93,31 @@ fn run_doctor(loaded: &LoadedConfig) -> Result<ExitCode> {
 }
 
 fn run_etl(loaded: &LoadedConfig, args: &EtlArgs) -> Result<ExitCode> {
-    if !args.dry_run {
-        bail!(
-            "only `etl --dry-run` is implemented so far (Milestone 1); \
-             the destination index arrives in Milestone 2"
-        );
-    }
-
     let source_path = loaded.config.source_db_path()?;
     let db = SourceDb::open(&source_path).context("run `ai-imessage doctor` for diagnostics")?;
-    let report = dryrun::build_report(&db)?;
-    println!("{report}");
 
-    if let Some(n) = args.debug_show_text {
-        eprintln!("\nwarning: --debug-show-text prints private message content");
-        let samples = dryrun::text_samples(&db, n)?;
-        println!("\nFirst {} message texts (truncated):", samples.len());
-        for s in samples {
-            println!("  {s}");
+    if args.dry_run {
+        let report = dryrun::build_report(&db)?;
+        println!("{report}");
+
+        if let Some(n) = args.debug_show_text {
+            eprintln!("\nwarning: --debug-show-text prints private message content");
+            let samples = dryrun::text_samples(&db, n)?;
+            println!("\nFirst {} message texts (truncated):", samples.len());
+            for s in samples {
+                println!("  {s}");
+            }
         }
+        return Ok(ExitCode::SUCCESS);
     }
+
+    let index_path = loaded.config.index_db_path()?;
+    let mut index = IndexDb::open(&index_path)?;
+    if args.rebuild {
+        index.reset()?;
+    }
+    let report = etl::sync(&db, &mut index, loaded.config.source.recent_overlap_rows)?;
+    println!("{report}");
     Ok(ExitCode::SUCCESS)
 }
 
