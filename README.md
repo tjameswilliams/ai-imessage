@@ -54,25 +54,96 @@ Configuration lives at `~/Library/Application Support/ai-imessage/config.toml`
 (TOML, all keys optional — no file is needed at all). See `config show` for
 the full schema and defaults.
 
-## Using from Claude
+## Using from MCP clients
 
-After `etl` has built the index, register the MCP server:
-
-```bash
-# Claude Code
-claude mcp add imessage -- /path/to/ai-imessage serve
-```
-
-For Claude Desktop, add to `claude_desktop_config.json`:
-
-```json
-{ "mcpServers": { "imessage": { "command": "/path/to/ai-imessage", "args": ["serve"] } } }
-```
+`ai-imessage serve` speaks MCP over stdio, so any MCP client can use it.
+Run `ai-imessage etl` once first so there is an index to serve, and
+replace `/path/to/ai-imessage` below with your binary's absolute path
+(e.g. `$(pwd)/target/release/ai-imessage` from a source build).
 
 Three read-only tools are exposed: `search_messages` (hybrid keyword +
 semantic retrieval), `get_conversation` (a hit expanded with surrounding
 messages), and `list_chats`. The server never writes and only ever sees
 the local index.
+
+### Claude Code
+
+```bash
+claude mcp add imessage -- /path/to/ai-imessage serve
+```
+
+### Claude Desktop
+
+Add to `claude_desktop_config.json` (Settings → Developer → Edit Config):
+
+```json
+{ "mcpServers": { "imessage": { "command": "/path/to/ai-imessage", "args": ["serve"] } } }
+```
+
+### LM Studio
+
+Program tab (right sidebar) → Install → Edit `mcp.json` — or edit
+`~/.lmstudio/mcp.json` directly:
+
+```json
+{ "mcpServers": { "imessage": { "command": "/path/to/ai-imessage", "args": ["serve"] } } }
+```
+
+### Codex
+
+```bash
+codex mcp add imessage -- /path/to/ai-imessage serve
+```
+
+or in `~/.codex/config.toml` (the section must be spelled `mcp_servers`;
+other spellings are silently ignored):
+
+```toml
+[mcp_servers.imessage]
+command = "/path/to/ai-imessage"
+args = ["serve"]
+```
+
+### OpenCode
+
+In `opencode.json` (project) or `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "imessage": {
+      "type": "local",
+      "command": ["/path/to/ai-imessage", "serve"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Hermes
+
+In `~/.hermes/config.yaml`, then `/reload-mcp` in a running session:
+
+```yaml
+mcp_servers:
+  imessage:
+    command: "/path/to/ai-imessage"
+    args: ["serve"]
+```
+
+### OpenClaw
+
+```bash
+openclaw mcp add imessage --command /path/to/ai-imessage --arg serve
+openclaw mcp doctor imessage --probe   # verify
+```
+
+or in `~/.openclaw/openclaw.json`:
+
+```json
+{ "mcp": { "servers": { "imessage": { "command": "/path/to/ai-imessage", "args": ["serve"] } } } }
+```
 
 ## Privacy
 
