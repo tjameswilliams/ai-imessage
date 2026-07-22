@@ -19,9 +19,9 @@ use crate::chunk::{ChunkInput, ChunkParams, chunk_messages};
 use crate::model::ExtractedMessage;
 
 /// Current destination schema version, stored in `PRAGMA user_version`.
-/// Additive changes only so far: opening a v1 index under v2 creates the
-/// missing tables in place.
-pub const SCHEMA_VERSION: i32 = 2;
+/// Additive changes only so far: opening an older index under a newer
+/// binary creates the missing tables in place.
+pub const SCHEMA_VERSION: i32 = 3;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -71,9 +71,15 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_chat ON chunks(chat_id, seq);
 CREATE INDEX IF NOT EXISTS chunks_hash ON chunks(content_hash);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text);
+CREATE TABLE IF NOT EXISTS embeddings (
+  chunk_hash TEXT PRIMARY KEY,   -- chunks.content_hash
+  model      TEXT NOT NULL,
+  vector     BLOB NOT NULL       -- f32 little-endian
+);
 ";
 
 const WATERMARK_KEY: &str = "source_watermark_rowid";
+const EMBEDDING_MODEL_KEY: &str = "embedding_model";
 
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -125,8 +131,21 @@ pub struct SearchHit {
     pub started_at_ms: Option<i64>,
     pub ended_at_ms: Option<i64>,
     pub message_count: i64,
-    /// FTS5 snippet with matches wrapped in «guillemets».
+    /// Keyword search: FTS5 snippet with matches wrapped in «guillemets».
+    /// Vector search: the truncated start of the chunk.
     pub snippet: String,
+    /// Cosine similarity, vector search only.
+    pub score: Option<f32>,
+}
+
+fn truncate_snippet(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    if text.chars().count() <= MAX_CHARS {
+        return text.to_string();
+    }
+    let mut s: String = text.chars().take(MAX_CHARS).collect();
+    s.push('…');
+    s
 }
 
 /// Quote every whitespace-separated term so user input is always a valid
@@ -223,6 +242,130 @@ impl IndexDb {
         self.count("chunks")
     }
 
+    pub fn embedding_count(&self) -> Result<u64, IndexError> {
+        self.count("embeddings")
+    }
+
+    /// Chunks that have no stored embedding yet, as (content_hash, text).
+    /// Hashes are distinct even if several chunk rows share content.
+    pub fn missing_embeddings(&self) -> Result<Vec<(String, String)>, IndexError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT content_hash, MIN(text) FROM chunks
+             WHERE content_hash NOT IN (SELECT chunk_hash FROM embeddings)
+             GROUP BY content_hash",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Store one batch of embeddings in its own transaction, so a long
+    /// embedding run that is interrupted keeps everything finished so far.
+    pub fn store_embeddings(
+        &mut self,
+        model: &str,
+        items: &[(String, Vec<f32>)],
+    ) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO embeddings (chunk_hash, model, vector) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chunk_hash) DO UPDATE SET
+                   model = excluded.model, vector = excluded.vector",
+            )?;
+            for (hash, vector) in items {
+                stmt.execute(params![hash, model, crate::embed::vector_to_blob(vector)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record which embedding model the index was built with. A model
+    /// change wipes all stored vectors (they are not comparable across
+    /// models); returns true when that happened.
+    pub fn ensure_embedding_model(&mut self, model: &str) -> Result<bool, IndexError> {
+        let stored = meta_get(&self.conn, EMBEDDING_MODEL_KEY)?;
+        match stored.as_deref() {
+            Some(s) if s == model => Ok(false),
+            Some(_) => {
+                let tx = self.conn.transaction()?;
+                tx.execute("DELETE FROM embeddings", [])?;
+                meta_set(&tx, EMBEDDING_MODEL_KEY, model)?;
+                tx.commit()?;
+                Ok(true)
+            }
+            None => {
+                meta_set(&self.conn, EMBEDDING_MODEL_KEY, model)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Drop embeddings whose chunk no longer exists (superseded by
+    /// re-chunking). Returns how many were removed.
+    pub fn prune_orphan_embeddings(&mut self) -> Result<u64, IndexError> {
+        let n = self.conn.execute(
+            "DELETE FROM embeddings
+             WHERE chunk_hash NOT IN (SELECT content_hash FROM chunks)",
+            [],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Brute-force cosine similarity over every embedded chunk, best first.
+    /// At hundreds of thousands of chunks this is still tens of
+    /// milliseconds; no vector index needed at this scale.
+    pub fn vector_search(&self, query: &[f32], limit: u32) -> Result<Vec<SearchHit>, IndexError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT
+               c.id,
+               COALESCE(
+                 NULLIF(ch.display_name, ''),
+                 (SELECT h.handle FROM messages m JOIN handles h ON h.id = m.sender_id
+                   WHERE m.chat_id = ch.id LIMIT 1),
+                 ch.guid
+               ),
+               c.started_at_ms,
+               c.ended_at_ms,
+               c.message_count,
+               c.text,
+               e.vector
+             FROM chunks c
+             JOIN embeddings e ON e.chunk_hash = c.content_hash
+             JOIN chats ch ON ch.id = c.chat_id",
+        )?;
+        let mut hits: Vec<(f32, SearchHit)> = stmt
+            .query_map([], |r| {
+                let text: String = r.get(5)?;
+                let blob: Vec<u8> = r.get(6)?;
+                Ok((
+                    crate::embed::cosine(query, &crate::embed::blob_to_vector(&blob)),
+                    SearchHit {
+                        chunk_id: r.get(0)?,
+                        chat_label: r.get(1)?,
+                        started_at_ms: r.get(2)?,
+                        ended_at_ms: r.get(3)?,
+                        message_count: r.get(4)?,
+                        snippet: truncate_snippet(&text),
+                        score: None,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+        hits.truncate(limit as usize);
+        Ok(hits
+            .into_iter()
+            .map(|(score, mut h)| {
+                h.score = Some(score);
+                h
+            })
+            .collect())
+    }
+
     /// FTS5 keyword search over conversation chunks, best match first.
     /// The user query is sanitized into quoted terms (implicit AND), so
     /// FTS5 operator syntax can never cause an error.
@@ -260,6 +403,7 @@ impl IndexDb {
                     ended_at_ms: r.get(3)?,
                     message_count: r.get(4)?,
                     snippet: r.get(5)?,
+                    score: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -279,7 +423,8 @@ impl IndexDb {
     pub fn reset(&mut self) -> Result<(), IndexError> {
         let tx = self.conn.transaction()?;
         tx.execute_batch(
-            "DELETE FROM chunks_fts;
+            "DELETE FROM embeddings;
+             DELETE FROM chunks_fts;
              DELETE FROM chunks;
              DELETE FROM messages;
              DELETE FROM chats;
@@ -292,18 +437,26 @@ impl IndexDb {
 }
 
 fn watermark_of(conn: &Connection) -> Result<i64, IndexError> {
-    let v: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            [WATERMARK_KEY],
-            |r| r.get(0),
-        )
+    let v = meta_get(conn, WATERMARK_KEY)?;
+    Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, IndexError> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
         .map(Some)
         .or_else(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })?;
-    Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
+            other => Err(IndexError::from(other)),
+        })
+}
+
+fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), IndexError> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 #[cfg(unix)]

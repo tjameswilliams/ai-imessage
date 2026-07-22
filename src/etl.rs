@@ -12,6 +12,7 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::chunk::ChunkParams;
+use crate::embed::Embedder;
 use crate::extract::{SourceDb, SourceError};
 use crate::index::{IndexDb, IndexError, Upsert, Writer};
 
@@ -21,6 +22,8 @@ pub enum EtlError {
     Source(#[from] SourceError),
     #[error(transparent)]
     Index(#[from] IndexError),
+    #[error("embedding failed: {0}")]
+    Embedding(#[source] anyhow::Error),
 }
 
 #[derive(Debug, Default, Serialize, PartialEq)]
@@ -143,6 +146,61 @@ pub fn sync(
     r.total_handles = index.handle_count()?;
     r.total_chunks = index.chunk_count()?;
     Ok(r)
+}
+
+#[derive(Debug, Default, Serialize, PartialEq)]
+pub struct EmbedReport {
+    pub model: String,
+    pub embedded: u64,
+    pub pruned: u64,
+    pub total: u64,
+}
+
+/// Embed every chunk that has no stored vector yet. Each batch commits on
+/// its own, so an interrupted run resumes where it left off. Progress goes
+/// to stderr via `progress` (chunks done, chunks to do).
+pub fn embed_missing(
+    index: &mut IndexDb,
+    embedder: &mut dyn Embedder,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<EmbedReport, EtlError> {
+    // Vectors from different models are not comparable; a model switch
+    // starts over.
+    index.ensure_embedding_model(&embedder.id())?;
+    let mut r = EmbedReport {
+        model: embedder.id(),
+        pruned: index.prune_orphan_embeddings()?,
+        ..EmbedReport::default()
+    };
+
+    // Batch sizing: large enough to amortize per-call overhead, small
+    // enough that each commit is prompt and interruption loses little.
+    const STORE_BATCH: usize = 256;
+    let missing = index.missing_embeddings()?;
+    let todo = missing.len() as u64;
+    for batch in missing.chunks(STORE_BATCH) {
+        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        let vectors = embedder.embed_docs(&texts).map_err(EtlError::Embedding)?;
+        let items: Vec<(String, Vec<f32>)> =
+            batch.iter().map(|(h, _)| h.clone()).zip(vectors).collect();
+        index.store_embeddings(&r.model, &items)?;
+        r.embedded += batch.len() as u64;
+        progress(r.embedded, todo);
+    }
+
+    r.total = index.embedding_count()?;
+    Ok(r)
+}
+
+impl fmt::Display for EmbedReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Embeddings ({})", self.model)?;
+        writeln!(f, "  Added:  {}", self.embedded)?;
+        if self.pruned > 0 {
+            writeln!(f, "  Pruned: {}", self.pruned)?;
+        }
+        write!(f, "  Total:  {}", self.total)
+    }
 }
 
 impl fmt::Display for SyncReport {

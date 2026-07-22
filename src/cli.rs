@@ -10,6 +10,7 @@ use crate::chunk::ChunkParams;
 use crate::config::{self, LoadedConfig};
 use crate::doctor;
 use crate::dryrun;
+use crate::embed;
 use crate::etl;
 use crate::extract::SourceDb;
 use crate::index::IndexDb;
@@ -63,6 +64,10 @@ pub struct EtlArgs {
     /// Discard the existing index and re-ingest everything from scratch
     #[arg(long, conflicts_with = "dry_run")]
     pub rebuild: bool,
+
+    /// Skip the embedding stage (sync and chunk only)
+    #[arg(long, conflicts_with = "dry_run")]
+    pub no_embed: bool,
 }
 
 #[derive(Args)]
@@ -74,6 +79,10 @@ pub struct SearchArgs {
     /// Maximum number of results (default: retrieval.result_limit)
     #[arg(long, value_name = "N")]
     pub limit: Option<u32>,
+
+    /// Semantic (embedding) search instead of keyword match
+    #[arg(long)]
+    pub semantic: bool,
 }
 
 #[derive(Subcommand)]
@@ -138,7 +147,22 @@ fn run_etl(loaded: &LoadedConfig, args: &EtlArgs) -> Result<ExitCode> {
         &chunk_params(loaded),
     )?;
     println!("{report}");
+
+    if !args.no_embed {
+        let mut embedder = embed::make_embedder(&loaded.config, &model_cache_dir(loaded)?)?;
+        let report = etl::embed_missing(&mut index, embedder.as_mut(), |done, todo| {
+            if done % 2048 == 0 || done == todo {
+                eprintln!("embedding… {done}/{todo}");
+            }
+        })?;
+        println!("\n{report}");
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Downloaded model weights live next to the index they serve.
+fn model_cache_dir(loaded: &LoadedConfig) -> Result<PathBuf> {
+    Ok(loaded.config.index_dir()?.join("models"))
 }
 
 fn chunk_params(loaded: &LoadedConfig) -> ChunkParams {
@@ -160,7 +184,13 @@ fn run_search(loaded: &LoadedConfig, args: &SearchArgs) -> Result<ExitCode> {
     let index = IndexDb::open(&index_path)?;
     let query = args.query.join(" ");
     let limit = args.limit.unwrap_or(loaded.config.retrieval.result_limit);
-    let hits = index.search(&query, limit)?;
+    let hits = if args.semantic {
+        let mut embedder = embed::make_embedder(&loaded.config, &model_cache_dir(loaded)?)?;
+        let query_vec = embedder.embed_query(&query)?;
+        index.vector_search(&query_vec, limit)?
+    } else {
+        index.search(&query, limit)?
+    };
 
     if hits.is_empty() {
         println!("No matches for \"{query}\".");
@@ -168,8 +198,12 @@ fn run_search(loaded: &LoadedConfig, args: &SearchArgs) -> Result<ExitCode> {
     }
     println!("{} result(s) for \"{query}\"\n", hits.len());
     for (i, h) in hits.iter().enumerate() {
+        let score = h
+            .score
+            .map(|s| format!(" · similarity {s:.2}"))
+            .unwrap_or_default();
         println!(
-            "{}. {} — {} ({} messages)",
+            "{}. {} — {} ({} messages{score})",
             i + 1,
             h.chat_label,
             format_range(h.started_at_ms, h.ended_at_ms),

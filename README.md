@@ -11,12 +11,12 @@ default).
 
 ## Status
 
-Early development. Milestone 3 of 8 (keyword search) is complete:
+Early development. Milestone 4 of 8 (semantic search) is complete:
 
 - [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
 - [x] **M2** Normalized destination database, incremental ETL
 - [x] **M3** Conversation chunking + FTS5 keyword search
-- [ ] **M4** Local embeddings + vector search
+- [x] **M4** Local embeddings + vector search
 - [ ] **M5** Hybrid retrieval (rank fusion)
 - [ ] **M6** MCP server
 - [ ] **M7** Scheduled ETL (LaunchAgent)
@@ -30,6 +30,7 @@ cargo build --release
 ./target/release/ai-imessage etl --dry-run   # count what's readable, write nothing
 ./target/release/ai-imessage etl             # sync messages into the local index
 ./target/release/ai-imessage search pizza    # keyword search over your history
+./target/release/ai-imessage search --semantic "plans for the weekend"
 ```
 
 `doctor` will walk you through granting Full Disk Access, which macOS
@@ -43,6 +44,7 @@ requires for any app reading `~/Library/Messages/chat.db`.
 | `ai-imessage etl` | Incremental sync into the local index (first run ingests everything; later runs rescan only the recent tail to catch edits/retractions). `--rebuild` starts over |
 | `ai-imessage etl --dry-run` | Read-only scan: message/chat counts, time range. No bodies printed unless `--debug-show-text N` is passed explicitly |
 | `ai-imessage search <terms>` | FTS5 keyword search over conversation chunks; prints matching snippets (`--limit N`) |
+| `ai-imessage search --semantic <terms>` | Embedding-based similarity search (`etl` must have run the embedding stage) |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 
@@ -54,7 +56,12 @@ the full schema and defaults.
 
 - Source database opened with `SQLITE_OPEN_READONLY` + `PRAGMA query_only`, enforced by tests.
 - The local index (`~/Library/Application Support/ai-imessage/index.sqlite`) contains full message bodies and is created with owner-only permissions (0600, directory 0700).
-- No telemetry, no network calls in the default configuration.
+- No telemetry. The only network access in the default configuration is a
+  one-time download of the embedding model weights (public model, no user
+  data sent); pass `etl --no-embed` to avoid even that.
+- Embedding runs locally via ONNX. An `openai-compatible` endpoint may be
+  configured instead; non-loopback endpoints are refused unless
+  `privacy.allow_remote_embedding_endpoint = true` is set explicitly.
 - Logs and reports never contain message content; `--debug-show-text` is the
   single, explicit, warned exception.
 - API keys are redacted from `config show` output.

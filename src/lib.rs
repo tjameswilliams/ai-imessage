@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod dryrun;
+pub mod embed;
 pub mod etl;
 pub mod extract;
 pub mod handles;

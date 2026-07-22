@@ -16,7 +16,8 @@ fn write_config(fixture_db: &Path, dir: &Path) -> PathBuf {
     std::fs::write(
         &config_path,
         format!(
-            "[source]\ndatabase_path = \"{}\"\n\n[index]\ndatabase_path = \"{}\"\n",
+            "[source]\ndatabase_path = \"{}\"\n\n[index]\ndatabase_path = \"{}\"\n\n\
+             [embeddings]\nprovider = \"debug-hash\"\n",
             fixture_db.display(),
             index_path.display()
         ),
@@ -163,6 +164,47 @@ fn search_returns_matches_after_etl() {
         .assert()
         .success()
         .stdout(predicate::str::contains("No matches"));
+}
+
+#[test]
+fn etl_embeds_chunks_and_semantic_search_finds_them() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Embeddings (debug-hash)")
+                .and(predicate::str::contains("Added:  ")),
+        );
+
+    cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "search",
+            "--semantic",
+            "SECRET",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("similarity").and(predicate::str::contains("SECRET BODY")),
+        );
+}
+
+#[test]
+fn etl_no_embed_skips_the_embedding_stage() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl", "--no-embed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Embeddings").not());
 }
 
 #[test]
