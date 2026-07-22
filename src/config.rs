@@ -89,12 +89,17 @@ impl Default for EmbeddingsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
     pub interval_seconds: u32,
+    /// Bearer token required by `serve --http`. When unset, a random token
+    /// is generated on first use and stored next to the index. Redacted in
+    /// `config show`.
+    pub http_token: Option<String>,
 }
 
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             interval_seconds: 300,
+            http_token: None,
         }
     }
 }
@@ -161,6 +166,9 @@ impl Config {
         let mut c = self.clone();
         if c.embeddings.api_key.is_some() {
             c.embeddings.api_key = Some("<redacted>".into());
+        }
+        if c.service.http_token.is_some() {
+            c.service.http_token = Some("<redacted>".into());
         }
         c
     }
@@ -287,6 +295,15 @@ mod tests {
         c.embeddings.api_key = Some("super-secret".into());
         let shown = c.redacted().to_toml().unwrap();
         assert!(!shown.contains("super-secret"));
+        assert!(shown.contains("<redacted>"));
+    }
+
+    #[test]
+    fn http_token_is_redacted() {
+        let mut c = Config::default();
+        c.service.http_token = Some("token-secret".into());
+        let shown = c.redacted().to_toml().unwrap();
+        assert!(!shown.contains("token-secret"));
         assert!(shown.contains("<redacted>"));
     }
 

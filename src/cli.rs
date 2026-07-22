@@ -44,8 +44,8 @@ pub enum Command {
     Etl(EtlArgs),
     /// Keyword search over the indexed history (prints message content)
     Search(SearchArgs),
-    /// Serve the index to MCP clients (Claude Code, Claude Desktop) over stdio
-    Serve,
+    /// Serve the index to MCP clients over stdio (default) or HTTP
+    Serve(ServeArgs),
     /// Inspect configuration
     Config {
         #[command(subcommand)]
@@ -92,6 +92,14 @@ pub struct SearchArgs {
     pub keyword: bool,
 }
 
+#[derive(Args)]
+pub struct ServeArgs {
+    /// Serve MCP over streamable HTTP on this address (e.g. 127.0.0.1:8787)
+    /// instead of stdio. Requests must present the bearer token.
+    #[arg(long, value_name = "ADDR")]
+    pub http: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Print the effective configuration (secrets redacted)
@@ -109,7 +117,7 @@ pub fn run() -> Result<ExitCode> {
         Command::Doctor => run_doctor(&loaded),
         Command::Etl(args) => run_etl(&loaded, &args),
         Command::Search(args) => run_search(&loaded, &args),
-        Command::Serve => run_serve(&loaded),
+        Command::Serve(args) => run_serve(&loaded, &args),
         Command::Config { command } => run_config(&loaded, &command),
     }
 }
@@ -264,7 +272,7 @@ fn format_range(start_ms: Option<i64>, end_ms: Option<i64>) -> String {
     }
 }
 
-fn run_serve(loaded: &LoadedConfig) -> Result<ExitCode> {
+fn run_serve(loaded: &LoadedConfig, args: &ServeArgs) -> Result<ExitCode> {
     use std::io::{BufRead, Write};
 
     let index_path = loaded.config.index_db_path()?;
@@ -276,6 +284,15 @@ fn run_serve(loaded: &LoadedConfig) -> Result<ExitCode> {
     }
     let index = IndexDb::open(&index_path)?;
     let mut server = crate::mcp::McpServer::new(index, loaded.config.clone());
+
+    if let Some(addr) = &args.http {
+        let token = match &loaded.config.service.http_token {
+            Some(t) => t.clone(),
+            None => load_or_create_http_token(&loaded.config.index_dir()?)?,
+        };
+        crate::mcp::serve_http(&mut server, addr, &token)?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     // stdout is the protocol channel: newline-delimited JSON-RPC frames,
     // nothing else. EOF on stdin is a clean shutdown.
@@ -301,6 +318,37 @@ fn run_serve(loaded: &LoadedConfig) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The HTTP bearer token: from config when set, else generated once and
+/// kept (owner-only) next to the index.
+fn load_or_create_http_token(index_dir: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+
+    let path = index_dir.join("http-token");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let token = existing.trim().to_string();
+        if !token.is_empty() {
+            eprintln!("using bearer token from {}", path.display());
+            return Ok(token);
+        }
+    }
+
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("could not read randomness for token generation")?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+    std::fs::create_dir_all(index_dir)?;
+    std::fs::write(&path, format!("{token}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    eprintln!("generated bearer token, stored at {}", path.display());
+    Ok(token)
 }
 
 fn run_config(loaded: &LoadedConfig, command: &ConfigCommand) -> Result<ExitCode> {

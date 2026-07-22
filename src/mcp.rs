@@ -246,6 +246,112 @@ impl McpServer {
     }
 }
 
+/// Serve MCP over streamable HTTP: a single `/mcp` endpoint accepting
+/// POSTed JSON-RPC messages, answering with `application/json`. Stateless
+/// (no session ids) and without server-initiated streams, both of which
+/// the spec permits; GET therefore answers 405.
+///
+/// Every request must carry `Authorization: Bearer <token>` — this serves
+/// a complete message history, so there is no unauthenticated mode.
+pub fn serve_http(server: &mut McpServer, addr: &str, token: &str) -> Result<()> {
+    let http =
+        tiny_http::Server::http(addr).map_err(|e| anyhow::anyhow!("could not bind {addr}: {e}"))?;
+    // The OS picks the port when the caller asked for :0; always report
+    // the resolved address so clients (and tests) know where to connect.
+    eprintln!("MCP listening on http://{}/mcp", http.server_addr());
+    if !addr.starts_with("127.0.0.1")
+        && !addr.starts_with("localhost")
+        && !addr.starts_with("[::1]")
+    {
+        eprintln!(
+            "warning: binding a non-loopback address exposes your entire \
+             message history to anyone on that network who has the token. \
+             Prefer 127.0.0.1 or a tailnet address."
+        );
+    }
+
+    const MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
+    for mut request in http.incoming_requests() {
+        let response = handle_http_request(server, &mut request, token, MAX_BODY_BYTES);
+        let _ = request.respond(response);
+    }
+    Ok(())
+}
+
+fn handle_http_request(
+    server: &mut McpServer,
+    request: &mut tiny_http::Request,
+    token: &str,
+    max_body: u64,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    use tiny_http::{Header, Method, Response};
+
+    let json_response = |status: u16, body: &Value| {
+        Response::from_data(body.to_string().into_bytes())
+            .with_status_code(status)
+            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+    };
+    let empty = |status: u16| Response::from_data(Vec::new()).with_status_code(status);
+
+    if request.url() != "/mcp" {
+        return empty(404);
+    }
+    match request.method() {
+        Method::Post => {}
+        // No server-initiated streams and no sessions to delete.
+        Method::Get | Method::Delete => return empty(405),
+        _ => return empty(405),
+    }
+
+    let authorized = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .map(|h| h.value.as_str())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|presented| constant_time_eq(presented.as_bytes(), token.as_bytes()));
+    if !authorized {
+        return Response::from_data(Vec::new())
+            .with_status_code(401)
+            .with_header(Header::from_bytes("WWW-Authenticate", "Bearer").unwrap());
+    }
+
+    let mut body = String::new();
+    use std::io::Read;
+    if request
+        .as_reader()
+        .take(max_body)
+        .read_to_string(&mut body)
+        .is_err()
+    {
+        return empty(400);
+    }
+    let msg: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_response(
+                400,
+                &rpc_error(Value::Null, -32700, &format!("parse error: {e}")),
+            );
+        }
+    };
+
+    match server.handle(&msg) {
+        Some(resp) => json_response(200, &resp),
+        // Notifications and responses get 202 Accepted with no body.
+        None => empty(202),
+    }
+}
+
+/// Compare secrets without early exit; a timing oracle on a token guarding
+/// a full message history is cheap to close.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 fn rpc_result(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }

@@ -47,6 +47,7 @@ requires for any app reading `~/Library/Messages/chat.db`.
 | `ai-imessage search --keyword <terms>` | FTS5 keyword match only |
 | `ai-imessage search --semantic <terms>` | Embedding similarity only |
 | `ai-imessage serve` | MCP server over stdio for Claude Code / Claude Desktop |
+| `ai-imessage serve --http ADDR` | MCP over streamable HTTP with bearer-token auth (for Open WebUI, remote/mobile MCP clients) |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 
@@ -131,6 +132,23 @@ mcp_servers:
     command: "/path/to/ai-imessage"
     args: ["serve"]
 ```
+
+### HTTP clients (Open WebUI, remote/mobile)
+
+Clients that speak MCP streamable HTTP (Open WebUI ≥ 0.6.31 under Admin
+Settings → External Tools, remote-connector mobile apps, …) connect to:
+
+```bash
+ai-imessage serve --http 127.0.0.1:8787
+# endpoint: http://127.0.0.1:8787/mcp
+# auth:     Authorization: Bearer <token>
+```
+
+Every request must present the bearer token — there is no unauthenticated
+mode. Set it via `[service].http_token` in the config, or let the server
+generate one on first run (stored owner-only next to the index, path
+printed at startup). Bind loopback or a private tailnet address only: the
+server exposes your entire message history to anyone holding the token.
 
 ### OpenClaw
 
