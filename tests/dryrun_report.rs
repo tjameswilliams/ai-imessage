@@ -50,6 +50,17 @@ fn fixture() -> Fixture {
     });
     f.link_chat_message(group, m4);
 
+    // A modern tapback: carries a summary body in the typedstream blob.
+    let m5 = f.add_message(&MessageSpec {
+        guid: "r5",
+        attributed_text: Some("Loved “typedstream body”"),
+        associated_message_type: 2000,
+        handle_id: Some(alice),
+        date: apple_ns("2025-03-01T10:00:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(direct, m5);
+
     f
 }
 
@@ -59,11 +70,12 @@ fn report_counts_are_correct() {
     let db = SourceDb::open(&f.db_path).unwrap();
     let r = build_report(&db).unwrap();
 
-    assert_eq!(r.total_messages, 4);
+    assert_eq!(r.total_messages, 5);
     assert_eq!(r.with_text_column, 1);
-    assert_eq!(r.recovered_from_typedstream, 1);
+    assert_eq!(r.recovered_from_typedstream, 2);
     assert_eq!(r.without_text, 2);
-    assert_eq!(r.tapbacks_without_text, 1);
+    // Both the textless tapback and the modern one with a recovered body.
+    assert_eq!(r.tapbacks, 2);
     assert_eq!(r.system_events, 1);
     assert_eq!(r.direct_chats, 1);
     assert_eq!(r.group_chats, 1);
@@ -116,8 +128,8 @@ fn text_samples_skip_textless_messages() {
     let f = fixture();
     let db = SourceDb::open(&f.db_path).unwrap();
     let samples = text_samples(&db, 10).unwrap();
-    // Only two messages have any text.
-    assert_eq!(samples.len(), 2);
+    // Only three messages have any text (two bodies plus the tapback summary).
+    assert_eq!(samples.len(), 3);
 }
 
 #[test]

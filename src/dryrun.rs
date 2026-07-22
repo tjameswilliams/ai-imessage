@@ -15,8 +15,9 @@ pub struct DryRunReport {
     pub with_text_column: u64,
     pub recovered_from_typedstream: u64,
     pub without_text: u64,
-    /// Subset of `without_text` that are tapbacks/reactions.
-    pub tapbacks_without_text: u64,
+    /// Tapbacks/reactions; counted regardless of whether text was recovered,
+    /// since modern tapbacks carry a summary body like `Loved "…"`.
+    pub tapbacks: u64,
     /// Group-membership changes and similar non-message items.
     pub system_events: u64,
     pub direct_chats: u64,
@@ -39,12 +40,10 @@ pub fn build_report(db: &SourceDb) -> Result<DryRunReport, SourceError> {
         match m.text_source {
             TextSource::TextColumn => r.with_text_column += 1,
             TextSource::AttributedBody => r.recovered_from_typedstream += 1,
-            TextSource::None => {
-                r.without_text += 1;
-                if m.is_tapback {
-                    r.tapbacks_without_text += 1;
-                }
-            }
+            TextSource::None => r.without_text += 1,
+        }
+        if m.is_tapback {
+            r.tapbacks += 1;
         }
         if m.is_system_event {
             r.system_events += 1;
@@ -113,11 +112,7 @@ impl fmt::Display for DryRunReport {
             self.recovered_from_typedstream
         )?;
         writeln!(f, "  No text content:            {}", self.without_text)?;
-        writeln!(
-            f,
-            "    of which tapbacks:        {}",
-            self.tapbacks_without_text
-        )?;
+        writeln!(f, "  Tapbacks/reactions:         {}", self.tapbacks)?;
         writeln!(f, "  System events (non-chat):   {}", self.system_events)?;
         writeln!(f)?;
         writeln!(f, "Chats")?;
