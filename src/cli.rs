@@ -148,11 +148,24 @@ fn run_etl(loaded: &LoadedConfig, args: &EtlArgs) -> Result<ExitCode> {
     if args.rebuild {
         index.reset()?;
     }
+    // Contact names are enrichment, never a requirement: a missing or
+    // unreadable AddressBook downgrades to handle-only labels.
+    let contacts = match loaded.config.contacts_path()? {
+        Some(path) => match crate::contacts::ContactBook::load(&path) {
+            Ok(book) => Some(book),
+            Err(e) => {
+                eprintln!("warning: contact names unavailable: {e}");
+                None
+            }
+        },
+        None => None,
+    };
     let report = etl::sync(
         &db,
         &mut index,
         loaded.config.source.recent_overlap_rows,
         &chunk_params(loaded),
+        contacts.as_ref(),
     )?;
     println!("{report}");
 

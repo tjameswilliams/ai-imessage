@@ -20,8 +20,8 @@ use crate::model::ExtractedMessage;
 
 /// Current destination schema version, stored in `PRAGMA user_version`.
 /// Additive changes only so far: opening an older index under a newer
-/// binary creates the missing tables in place.
-pub const SCHEMA_VERSION: i32 = 3;
+/// binary creates the missing tables and columns in place.
+pub const SCHEMA_VERSION: i32 = 4;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -35,8 +35,9 @@ CREATE TABLE IF NOT EXISTS chats (
   display_name TEXT
 );
 CREATE TABLE IF NOT EXISTS handles (
-  id     INTEGER PRIMARY KEY,
-  handle TEXT NOT NULL UNIQUE
+  id           INTEGER PRIMARY KEY,
+  handle       TEXT NOT NULL UNIQUE,
+  display_name TEXT               -- from Contacts, when resolvable
 );
 CREATE TABLE IF NOT EXISTS messages (
   id              INTEGER PRIMARY KEY,
@@ -233,6 +234,7 @@ impl IndexDb {
             });
         }
         conn.execute_batch(SCHEMA_SQL)?;
+        migrate_columns(&conn)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
         Ok(IndexDb {
@@ -264,6 +266,15 @@ impl IndexDb {
 
     pub fn handle_count(&self) -> Result<u64, IndexError> {
         self.count("handles")
+    }
+
+    pub fn named_handle_count(&self) -> Result<u64, IndexError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM handles WHERE display_name IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
     }
 
     pub fn chunk_count(&self) -> Result<u64, IndexError> {
@@ -351,7 +362,8 @@ impl IndexDb {
                c.id,
                COALESCE(
                  NULLIF(ch.display_name, ''),
-                 (SELECT h.handle FROM messages m JOIN handles h ON h.id = m.sender_id
+                 (SELECT COALESCE(h.display_name, h.handle)
+                   FROM messages m JOIN handles h ON h.id = m.sender_id
                    WHERE m.chat_id = ch.id LIMIT 1),
                  ch.guid
                ),
@@ -410,7 +422,8 @@ impl IndexDb {
                c.id,
                COALESCE(
                  NULLIF(ch.display_name, ''),  -- Messages stores '' not NULL
-                 (SELECT h.handle FROM messages m JOIN handles h ON h.id = m.sender_id
+                 (SELECT COALESCE(h.display_name, h.handle)
+                   FROM messages m JOIN handles h ON h.id = m.sender_id
                    WHERE m.chat_id = ch.id LIMIT 1),
                  ch.guid
                ),
@@ -496,7 +509,8 @@ impl IndexDb {
         let chat_label: String = self.conn.query_row(
             "SELECT COALESCE(
                NULLIF(display_name, ''),
-               (SELECT h.handle FROM messages m JOIN handles h ON h.id = m.sender_id
+               (SELECT COALESCE(h.display_name, h.handle)
+                   FROM messages m JOIN handles h ON h.id = m.sender_id
                  WHERE m.chat_id = chats.id LIMIT 1),
                guid
              ) FROM chats WHERE id = ?1",
@@ -505,7 +519,7 @@ impl IndexDb {
         )?;
 
         const MSG_COLS: &str = "CASE WHEN m.is_from_me THEN 'Me'
-                                     ELSE COALESCE(h.handle, 'unknown') END,
+                                     ELSE COALESCE(h.display_name, h.handle, 'unknown') END,
                                 m.text, m.sent_at_ms";
         const MSG_FROM: &str = "FROM messages m
                                 LEFT JOIN handles h ON h.id = m.sender_id
@@ -573,7 +587,8 @@ impl IndexDb {
                SELECT
                  COALESCE(
                    NULLIF(ch.display_name, ''),
-                   (SELECT h.handle FROM messages m2 JOIN handles h ON h.id = m2.sender_id
+                   (SELECT COALESCE(h.display_name, h.handle)
+                     FROM messages m2 JOIN handles h ON h.id = m2.sender_id
                      WHERE m2.chat_id = ch.id LIMIT 1),
                    ch.guid
                  ) AS label,
@@ -617,6 +632,22 @@ impl IndexDb {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Probe-based column migrations: `CREATE TABLE IF NOT EXISTS` keeps an
+/// existing table as-is, so columns added in later schema versions are
+/// bolted on here. Idempotent.
+fn migrate_columns(conn: &Connection) -> Result<(), IndexError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(handles)")?;
+    let has_display_name = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|c| c == "display_name");
+    if !has_display_name {
+        conn.execute("ALTER TABLE handles ADD COLUMN display_name TEXT", [])?;
+    }
+    Ok(())
 }
 
 fn watermark_of(conn: &Connection) -> Result<i64, IndexError> {
@@ -787,6 +818,44 @@ impl<'tx> Writer<'tx> {
         Ok(ids)
     }
 
+    /// Refresh every handle's display name from Contacts. Returns the ids
+    /// of chats whose participants were renamed — their chunks bake the
+    /// sender name into the text, so they must be re-chunked.
+    pub fn apply_contact_names(
+        &self,
+        book: &crate::contacts::ContactBook,
+    ) -> Result<std::collections::HashSet<i64>, IndexError> {
+        let mut stmt = self
+            .tx
+            .prepare_cached("SELECT id, handle, display_name FROM handles")?;
+        let rows: Vec<(i64, String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+
+        let mut renamed_handles = Vec::new();
+        for (id, handle, current) in rows {
+            let resolved = book.resolve(&handle).map(String::from);
+            if resolved != current {
+                self.tx
+                    .prepare_cached("UPDATE handles SET display_name = ?2 WHERE id = ?1")?
+                    .execute(params![id, resolved])?;
+                renamed_handles.push(id);
+            }
+        }
+
+        let mut dirty = std::collections::HashSet::new();
+        for handle_id in renamed_handles {
+            let mut stmt = self.tx.prepare_cached(
+                "SELECT DISTINCT chat_id FROM messages
+                 WHERE sender_id = ?1 AND chat_id IS NOT NULL",
+            )?;
+            for chat in stmt.query_map([handle_id], |r| r.get::<_, i64>(0))? {
+                dirty.insert(chat?);
+            }
+        }
+        Ok(dirty)
+    }
+
     /// Rebuild the chunks of one chat from its indexed messages, reusing
     /// rows whose content hash is unchanged so downstream layers keyed on
     /// chunk identity (embeddings) are not invalidated by appends.
@@ -799,7 +868,8 @@ impl<'tx> Writer<'tx> {
     ) -> Result<(u64, u64, u64), IndexError> {
         let mut load = self.tx.prepare_cached(
             "SELECT
-               CASE WHEN m.is_from_me THEN 'Me' ELSE COALESCE(h.handle, 'unknown') END,
+               CASE WHEN m.is_from_me THEN 'Me'
+                    ELSE COALESCE(h.display_name, h.handle, 'unknown') END,
                m.text,
                m.sent_at_ms
              FROM messages m

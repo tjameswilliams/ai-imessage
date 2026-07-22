@@ -42,7 +42,7 @@ impl World {
     fn sync(&self) {
         let source = SourceDb::open(&self.fixture.db_path).unwrap();
         let mut index = IndexDb::open(&self.index_path).unwrap();
-        sync(&source, &mut index, 100, &CHUNKING).unwrap();
+        sync(&source, &mut index, 100, &CHUNKING, None).unwrap();
     }
 
     fn embed(&self) -> ai_imessage::etl::EmbedReport {

@@ -74,7 +74,7 @@ fn server() -> (Fixture, McpServer) {
     let index_path = f.dir.path().join("index.sqlite");
     let source = SourceDb::open(&f.db_path).unwrap();
     let mut index = IndexDb::open(&index_path).unwrap();
-    sync(&source, &mut index, 100, &CHUNKING).unwrap();
+    sync(&source, &mut index, 100, &CHUNKING, None).unwrap();
     let mut embedder = make_embedder(&debug_config(), f.dir.path()).unwrap();
     embed_missing(&mut index, embedder.as_mut(), |_, _| {}).unwrap();
 

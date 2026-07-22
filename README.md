@@ -148,6 +148,9 @@ or in `~/.openclaw/openclaw.json`:
 ## Privacy
 
 - Source database opened with `SQLITE_OPEN_READONLY` + `PRAGMA query_only`, enforced by tests.
+- Contact names are resolved from the local macOS Contacts store (read-only)
+  so search results say "Alice Smith" instead of "+1 916…". Names never
+  leave the machine; set `[source].contacts_path = ""` to disable.
 - The local index (`~/Library/Application Support/ai-imessage/index.sqlite`) contains full message bodies and is created with owner-only permissions (0600, directory 0700).
 - No telemetry. The only network access in the default configuration is a
   one-time download of the embedding model weights (public model, no user

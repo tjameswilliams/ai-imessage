@@ -12,6 +12,7 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::chunk::ChunkParams;
+use crate::contacts::ContactBook;
 use crate::embed::Embedder;
 use crate::extract::{SourceDb, SourceError};
 use crate::index::{IndexDb, IndexError, Upsert, Writer};
@@ -36,6 +37,8 @@ pub struct SyncReport {
     pub watermark_before: i64,
     pub watermark_after: i64,
     pub rechunked_chats: u64,
+    /// Handles with a Contacts display name after this run.
+    pub named_handles: u64,
     pub total_messages: u64,
     pub total_chats: u64,
     pub total_handles: u64,
@@ -50,6 +53,7 @@ pub fn sync(
     index: &mut IndexDb,
     overlap: u32,
     chunking: &ChunkParams,
+    contacts: Option<&ContactBook>,
 ) -> Result<SyncReport, EtlError> {
     let mut r = SyncReport {
         index_path: index.path().display().to_string(),
@@ -133,6 +137,11 @@ pub fn sync(
         if let Some(e) = failure {
             return Err(e); // tx drops without commit: full rollback
         }
+        // Names must land before re-chunking: chunk text bakes them in,
+        // and a rename dirties every chat that person appears in.
+        if let Some(book) = contacts {
+            dirty_chats.extend(writer.apply_contact_names(book)?);
+        }
         for chat_id in dirty_chats {
             writer.rechunk_chat(chat_id, chunking)?;
             r.rechunked_chats += 1;
@@ -145,6 +154,7 @@ pub fn sync(
     r.total_chats = index.chat_count()?;
     r.total_handles = index.handle_count()?;
     r.total_chunks = index.chunk_count()?;
+    r.named_handles = index.named_handle_count()?;
     Ok(r)
 }
 
@@ -221,7 +231,11 @@ impl fmt::Display for SyncReport {
         writeln!(f, "Index totals")?;
         writeln!(f, "  Messages:  {}", self.total_messages)?;
         writeln!(f, "  Chats:     {}", self.total_chats)?;
-        writeln!(f, "  Handles:   {}", self.total_handles)?;
+        writeln!(
+            f,
+            "  Handles:   {} ({} with contact names)",
+            self.total_handles, self.named_handles
+        )?;
         writeln!(f, "  Chunks:    {}", self.total_chunks)?;
         write!(f, "  Watermark: source ROWID {}", self.watermark_after)
     }

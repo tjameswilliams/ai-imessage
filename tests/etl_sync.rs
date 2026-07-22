@@ -39,7 +39,7 @@ impl World {
     fn sync_with_overlap(&self, overlap: u32) -> ai_imessage::etl::SyncReport {
         let source = SourceDb::open(&self.fixture.db_path).unwrap();
         let mut index = IndexDb::open(&self.index_path).unwrap();
-        sync(&source, &mut index, overlap, &CHUNKING).unwrap()
+        sync(&source, &mut index, overlap, &CHUNKING, None).unwrap()
     }
 
     /// Read-only peek into the produced index for assertions.
@@ -301,7 +301,7 @@ fn reset_then_sync_reingests_from_scratch() {
     let source = SourceDb::open(&w.fixture.db_path).unwrap();
     let mut index = IndexDb::open(&w.index_path).unwrap();
     index.reset().unwrap();
-    let r = sync(&source, &mut index, OVERLAP, &CHUNKING).unwrap();
+    let r = sync(&source, &mut index, OVERLAP, &CHUNKING, None).unwrap();
 
     assert_eq!(r.watermark_before, 0);
     assert_eq!(r.inserted, 3);
@@ -325,7 +325,7 @@ fn legacy_schema_syncs_without_modern_columns() {
     let source = SourceDb::open(&fixture.db_path).unwrap();
     let index_path = fixture.dir.path().join("index.sqlite");
     let mut index = IndexDb::open(&index_path).unwrap();
-    let r = sync(&source, &mut index, OVERLAP, &CHUNKING).unwrap();
+    let r = sync(&source, &mut index, OVERLAP, &CHUNKING, None).unwrap();
 
     assert_eq!(r.inserted, 1);
     assert_eq!(r.total_messages, 1);

@@ -25,6 +25,9 @@ pub struct Config {
 pub struct SourceConfig {
     pub database_path: String,
     pub recent_overlap_rows: u32,
+    /// macOS Contacts store used to resolve handles to names. Set to ""
+    /// to disable contact-name resolution entirely.
+    pub contacts_path: String,
 }
 
 impl Default for SourceConfig {
@@ -32,6 +35,7 @@ impl Default for SourceConfig {
         Self {
             database_path: "~/Library/Messages/chat.db".into(),
             recent_overlap_rows: 5000,
+            contacts_path: "~/Library/Application Support/AddressBook".into(),
         }
     }
 }
@@ -132,6 +136,15 @@ impl Config {
         paths::expand_tilde(&self.source.database_path)
     }
 
+    /// Absolute path to the Contacts store, with `~` expanded. `None`
+    /// when contact-name resolution is disabled (empty path).
+    pub fn contacts_path(&self) -> Result<Option<PathBuf>> {
+        if self.source.contacts_path.trim().is_empty() {
+            return Ok(None);
+        }
+        paths::expand_tilde(&self.source.contacts_path).map(Some)
+    }
+
     /// Absolute path to the destination index database, with `~` expanded.
     pub fn index_db_path(&self) -> Result<PathBuf> {
         paths::expand_tilde(&self.index.database_path)
@@ -215,6 +228,10 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.source.database_path, "~/Library/Messages/chat.db");
         assert_eq!(c.source.recent_overlap_rows, 5000);
+        assert_eq!(
+            c.source.contacts_path,
+            "~/Library/Application Support/AddressBook"
+        );
         assert_eq!(c.index.chunk_gap_minutes, 45);
         assert_eq!(c.index.chunk_target_tokens, 750);
         assert_eq!(c.index.chunk_overlap_messages, 3);

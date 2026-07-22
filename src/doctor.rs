@@ -104,8 +104,40 @@ pub fn run_checks(loaded: &LoadedConfig) -> Vec<Check> {
         )),
     }
 
+    checks.push(check_contacts(loaded));
     checks.push(check_fts5());
     checks
+}
+
+/// Contact names are enrichment, so problems here warn instead of fail.
+pub fn check_contacts(loaded: &LoadedConfig) -> Check {
+    const NAME: &str = "contacts database";
+    match loaded.config.contacts_path() {
+        Ok(None) => Check::pass(NAME, "contact-name resolution disabled by config"),
+        Ok(Some(path)) => match crate::contacts::ContactBook::load(&path) {
+            Ok(book) => Check::pass(
+                NAME,
+                format!(
+                    "{} names loaded from {} database(s)",
+                    book.names(),
+                    book.databases()
+                ),
+            ),
+            Err(e) => Check::warn(
+                NAME,
+                e.to_string(),
+                "Messages will be labeled by phone number / email instead of \
+                 contact names. If the path looks right, this is usually a \
+                 missing Full Disk Access grant.",
+            ),
+        },
+        Err(e) => Check::warn(
+            NAME,
+            format!("could not resolve contacts path: {e}"),
+            "Fix [source].contacts_path in the config file, or set it to \"\" \
+             to disable contact-name resolution.",
+        ),
+    }
 }
 
 pub fn check_platform() -> Check {

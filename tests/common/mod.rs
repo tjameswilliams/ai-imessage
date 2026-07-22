@@ -276,6 +276,54 @@ fn schema_sql(variant: SchemaVariant) -> &'static str {
     }
 }
 
+/// One synthetic contact: (first, last, organization, phones, emails).
+pub type ContactSpec<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [&'a str]);
+
+/// Build a synthetic macOS Contacts (AddressBook) directory containing one
+/// database with the given contacts. Returns the directory to point
+/// `[source].contacts_path` at.
+pub fn build_contacts_dir(dir: &std::path::Path, contacts: &[ContactSpec]) -> PathBuf {
+    let root = dir.join("AddressBook");
+    std::fs::create_dir_all(&root).expect("create contacts dir");
+    let conn = Connection::open(root.join("AddressBook-v22.abcddb")).expect("create contacts db");
+    conn.execute_batch(
+        "CREATE TABLE ZABCDRECORD (
+           Z_PK INTEGER PRIMARY KEY, ZFIRSTNAME TEXT, ZLASTNAME TEXT, ZORGANIZATION TEXT
+         );
+         CREATE TABLE ZABCDPHONENUMBER (
+           Z_PK INTEGER PRIMARY KEY, ZOWNER INTEGER, ZFULLNUMBER TEXT
+         );
+         CREATE TABLE ZABCDEMAILADDRESS (
+           Z_PK INTEGER PRIMARY KEY, ZOWNER INTEGER, ZADDRESS TEXT
+         );",
+    )
+    .expect("create contacts schema");
+    for (first, last, org, phones, emails) in contacts {
+        conn.execute(
+            "INSERT INTO ZABCDRECORD (ZFIRSTNAME, ZLASTNAME, ZORGANIZATION)
+             VALUES (NULLIF(?1, ''), NULLIF(?2, ''), NULLIF(?3, ''))",
+            params![first, last, org],
+        )
+        .expect("insert contact");
+        let owner = conn.last_insert_rowid();
+        for p in *phones {
+            conn.execute(
+                "INSERT INTO ZABCDPHONENUMBER (ZOWNER, ZFULLNUMBER) VALUES (?1, ?2)",
+                params![owner, p],
+            )
+            .expect("insert phone");
+        }
+        for e in *emails {
+            conn.execute(
+                "INSERT INTO ZABCDEMAILADDRESS (ZOWNER, ZADDRESS) VALUES (?1, ?2)",
+                params![owner, e],
+            )
+            .expect("insert email");
+        }
+    }
+    root
+}
+
 /// Convert an RFC 3339 timestamp to Apple nanoseconds (modern `message.date`).
 pub fn apple_ns(rfc3339: &str) -> i64 {
     apple_secs(rfc3339) * 1_000_000_000

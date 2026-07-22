@@ -9,6 +9,7 @@ pub mod appledate;
 pub mod chunk;
 pub mod cli;
 pub mod config;
+pub mod contacts;
 pub mod doctor;
 pub mod dryrun;
 pub mod embed;
