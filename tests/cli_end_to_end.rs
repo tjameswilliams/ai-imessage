@@ -253,6 +253,54 @@ fn default_search_is_hybrid_and_mode_flags_narrow_it() {
 }
 
 #[test]
+fn serve_speaks_mcp_over_stdio() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "etl"])
+        .assert()
+        .success();
+
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_messages","arguments":{"query":"SECRET"}}}"#,
+        "\n",
+        "this is not json\n",
+    );
+    // Closing stdin (end of input) shuts the server down cleanly.
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "serve"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(r#""name":"ai-imessage""#)
+                .and(predicate::str::contains("search_messages"))
+                .and(predicate::str::contains("SECRET BODY ONE"))
+                .and(predicate::str::contains("-32700")),
+        );
+}
+
+#[test]
+fn serve_without_an_index_fails_with_etl_hint() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+
+    cmd()
+        .args(["--config", config.to_str().unwrap(), "serve"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run `ai-imessage etl` first"));
+}
+
+#[test]
 fn search_without_an_index_says_to_run_etl() {
     let f = populated_fixture();
     let config = write_config(&f.db_path, f.dir.path());

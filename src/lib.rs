@@ -16,6 +16,7 @@ pub mod etl;
 pub mod extract;
 pub mod handles;
 pub mod index;
+pub mod mcp;
 pub mod model;
 pub mod paths;
 pub mod retrieve;

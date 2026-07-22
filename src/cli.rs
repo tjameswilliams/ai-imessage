@@ -44,6 +44,8 @@ pub enum Command {
     Etl(EtlArgs),
     /// Keyword search over the indexed history (prints message content)
     Search(SearchArgs),
+    /// Serve the index to MCP clients (Claude Code, Claude Desktop) over stdio
+    Serve,
     /// Inspect configuration
     Config {
         #[command(subcommand)]
@@ -107,6 +109,7 @@ pub fn run() -> Result<ExitCode> {
         Command::Doctor => run_doctor(&loaded),
         Command::Etl(args) => run_etl(&loaded, &args),
         Command::Search(args) => run_search(&loaded, &args),
+        Command::Serve => run_serve(&loaded),
         Command::Config { command } => run_config(&loaded, &command),
     }
 }
@@ -246,6 +249,45 @@ fn format_range(start_ms: Option<i64>, end_ms: Option<i64>) -> String {
         (Some(s), None) | (None, Some(s)) => day(s),
         (None, None) => "unknown date".into(),
     }
+}
+
+fn run_serve(loaded: &LoadedConfig) -> Result<ExitCode> {
+    use std::io::{BufRead, Write};
+
+    let index_path = loaded.config.index_db_path()?;
+    if !index_path.exists() {
+        anyhow::bail!(
+            "no index at {} — run `ai-imessage etl` first",
+            index_path.display()
+        );
+    }
+    let index = IndexDb::open(&index_path)?;
+    let mut server = crate::mcp::McpServer::new(index, loaded.config.clone());
+
+    // stdout is the protocol channel: newline-delimited JSON-RPC frames,
+    // nothing else. EOF on stdin is a clean shutdown.
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(msg) => server.handle(&msg),
+            Err(e) => Some(crate::mcp::rpc_error(
+                serde_json::Value::Null,
+                -32700,
+                &format!("parse error: {e}"),
+            )),
+        };
+        if let Some(resp) = response {
+            serde_json::to_writer(&mut stdout, &resp)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_config(loaded: &LoadedConfig, command: &ConfigCommand) -> Result<ExitCode> {

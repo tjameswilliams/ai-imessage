@@ -148,6 +148,34 @@ fn truncate_snippet(text: &str) -> String {
     s
 }
 
+/// One message inside a conversation window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextMessage {
+    /// "Me" or the sender's handle.
+    pub sender: String,
+    pub text: String,
+    pub sent_at_ms: Option<i64>,
+    /// True for messages inside the requested chunk's time span, false
+    /// for surrounding context.
+    pub in_span: bool,
+}
+
+/// A chunk's messages plus surrounding context from the same chat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationWindow {
+    pub chat_label: String,
+    pub messages: Vec<ContextMessage>,
+}
+
+/// One row of `list_chats`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatSummary {
+    pub label: String,
+    pub is_group: Option<bool>,
+    pub message_count: i64,
+    pub last_message_ms: Option<i64>,
+}
+
 /// Quote every whitespace-separated term so user input is always a valid
 /// FTS5 query (terms AND together; operators lose their meaning).
 fn sanitize_fts_query(query: &str) -> String {
@@ -419,6 +447,158 @@ impl IndexDb {
             .conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
+    }
+
+    /// Full text of one chunk, for tool responses that want more than a
+    /// snippet.
+    pub fn chunk_text(&self, chunk_id: i64) -> Result<Option<String>, IndexError> {
+        self.conn
+            .query_row("SELECT text FROM chunks WHERE id = ?1", [chunk_id], |r| {
+                r.get(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(IndexError::from(other)),
+            })
+    }
+
+    /// The messages a chunk covers plus up to `before`/`after` surrounding
+    /// messages from the same chat. `None` when the chunk does not exist.
+    pub fn conversation_window(
+        &self,
+        chunk_id: i64,
+        before: u32,
+        after: u32,
+    ) -> Result<Option<ConversationWindow>, IndexError> {
+        let span = self
+            .conn
+            .query_row(
+                "SELECT chat_id, started_at_ms, ended_at_ms FROM chunks WHERE id = ?1",
+                [chunk_id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(IndexError::from(other)),
+            })?;
+        let Some((chat_id, start_ms, end_ms)) = span else {
+            return Ok(None);
+        };
+
+        let chat_label: String = self.conn.query_row(
+            "SELECT COALESCE(
+               NULLIF(display_name, ''),
+               (SELECT h.handle FROM messages m JOIN handles h ON h.id = m.sender_id
+                 WHERE m.chat_id = chats.id LIMIT 1),
+               guid
+             ) FROM chats WHERE id = ?1",
+            [chat_id],
+            |r| r.get(0),
+        )?;
+
+        const MSG_COLS: &str = "CASE WHEN m.is_from_me THEN 'Me'
+                                     ELSE COALESCE(h.handle, 'unknown') END,
+                                m.text, m.sent_at_ms";
+        const MSG_FROM: &str = "FROM messages m
+                                LEFT JOIN handles h ON h.id = m.sender_id
+                                WHERE m.chat_id = ?1
+                                  AND m.text IS NOT NULL
+                                  AND m.is_system_event = 0
+                                  AND m.sent_at_ms IS NOT NULL";
+        let row = |in_span: bool| {
+            move |r: &rusqlite::Row<'_>| -> rusqlite::Result<ContextMessage> {
+                Ok(ContextMessage {
+                    sender: r.get(0)?,
+                    text: r.get(1)?,
+                    sent_at_ms: r.get(2)?,
+                    in_span,
+                })
+            }
+        };
+
+        let (start_ms, end_ms) = (start_ms.unwrap_or(0), end_ms.unwrap_or(i64::MAX));
+        let mut messages: Vec<ContextMessage> = Vec::new();
+
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {MSG_COLS} {MSG_FROM} AND m.sent_at_ms < ?2
+             ORDER BY m.sent_at_ms DESC, m.id DESC LIMIT ?3"
+        ))?;
+        let mut earlier: Vec<ContextMessage> = stmt
+            .query_map(params![chat_id, start_ms, before], row(false))?
+            .collect::<Result<_, _>>()?;
+        earlier.reverse();
+        messages.extend(earlier);
+
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {MSG_COLS} {MSG_FROM} AND m.sent_at_ms BETWEEN ?2 AND ?3
+             ORDER BY m.sent_at_ms, m.id"
+        ))?;
+        messages.extend(
+            stmt.query_map(params![chat_id, start_ms, end_ms], row(true))?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {MSG_COLS} {MSG_FROM} AND m.sent_at_ms > ?2
+             ORDER BY m.sent_at_ms, m.id LIMIT ?3"
+        ))?;
+        messages.extend(
+            stmt.query_map(params![chat_id, end_ms, after], row(false))?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+
+        Ok(Some(ConversationWindow {
+            chat_label,
+            messages,
+        }))
+    }
+
+    /// Chats by recency, optionally filtered by a case-insensitive
+    /// substring of the label.
+    pub fn list_chats(
+        &self,
+        filter: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ChatSummary>, IndexError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT label, is_group, n, last_ms FROM (
+               SELECT
+                 COALESCE(
+                   NULLIF(ch.display_name, ''),
+                   (SELECT h.handle FROM messages m2 JOIN handles h ON h.id = m2.sender_id
+                     WHERE m2.chat_id = ch.id LIMIT 1),
+                   ch.guid
+                 ) AS label,
+                 ch.is_group AS is_group,
+                 COUNT(m.id) AS n,
+                 MAX(m.sent_at_ms) AS last_ms
+               FROM chats ch
+               LEFT JOIN messages m ON m.chat_id = ch.id
+               GROUP BY ch.id
+             )
+             WHERE ?1 IS NULL OR label LIKE '%' || ?1 || '%'
+             ORDER BY last_ms IS NULL, last_ms DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![filter, limit], |r| {
+                Ok(ChatSummary {
+                    label: r.get(0)?,
+                    is_group: r.get(1)?,
+                    message_count: r.get(2)?,
+                    last_message_ms: r.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Drop all ingested data and reset the watermark, keeping the schema.
