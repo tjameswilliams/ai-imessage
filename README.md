@@ -32,6 +32,9 @@ brew install tjameswilliams/tap/ai-imessage
 
 or from source: `cargo install --path .` (puts the binary in `~/.cargo/bin`).
 
+**New here? Follow [the recommended path](docs/recommended-path.md)** —
+the tested route from install to phone access, including every gotcha.
+
 ## Quick start
 
 ```bash
