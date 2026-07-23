@@ -322,8 +322,11 @@ pub fn uninstall(http_only: bool) -> Result<()> {
         targets.push((LABEL, plist_path()?));
     }
     for (label, plist) in targets {
-        let _ = launchctl(&["bootout", &format!("gui/{uid}/{label}")]);
+        // Bootout only what we installed: launchd state is machine-global,
+        // and an unconditional bootout would tear down a real agent even
+        // when this invocation's HOME (e.g. in tests) owns no plist.
         if plist.exists() {
+            let _ = launchctl(&["bootout", &format!("gui/{uid}/{label}")]);
             fs::remove_file(&plist)?;
             println!("removed {}", plist.display());
         } else {
