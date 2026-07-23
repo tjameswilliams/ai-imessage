@@ -1,8 +1,10 @@
 # ai-imessage
 
+![ai-imessage — local-first Apple Messages search for AI agents](assets/header.jpg)
+
 Local-first Apple Messages RAG for AI agents. Indexes your Messages history
 into a private local database and exposes read-only search to MCP clients
-like Claude Code and Claude Desktop.
+like Claude Code, Claude Desktop, and LM Studio.
 
 **Everything stays on your machine.** The Apple Messages database is only
 ever opened read-only; the index, embeddings, and search never leave your
@@ -62,10 +64,16 @@ Run `ai-imessage etl` once first so there is an index to serve, and
 replace `/path/to/ai-imessage` below with your binary's absolute path
 (e.g. `$(pwd)/target/release/ai-imessage` from a source build).
 
-Three read-only tools are exposed: `search_messages` (hybrid keyword +
-semantic retrieval), `get_conversation` (a hit expanded with surrounding
-messages), and `list_chats`. The server never writes and only ever sees
-the local index.
+Four read-only tools are exposed:
+
+- `search_messages` — hybrid keyword + semantic retrieval by topic
+- `get_recent_messages` — the chronological tail: when someone was last
+  talked to and what was said, scoped to a contact (their messages plus
+  yours in direct chats with them), a chat, or everything
+- `get_conversation` — a search hit expanded with surrounding messages
+- `list_chats` — chats by recency, with contact-name labels
+
+The server never writes and only ever sees the local index.
 
 ### Claude Code
 
@@ -133,6 +141,19 @@ mcp_servers:
     args: ["serve"]
 ```
 
+### OpenClaw
+
+```bash
+openclaw mcp add imessage --command /path/to/ai-imessage --arg serve
+openclaw mcp doctor imessage --probe   # verify
+```
+
+or in `~/.openclaw/openclaw.json`:
+
+```json
+{ "mcp": { "servers": { "imessage": { "command": "/path/to/ai-imessage", "args": ["serve"] } } } }
+```
+
 ### HTTP clients (Open WebUI, remote/mobile)
 
 Clients that speak MCP streamable HTTP (Open WebUI ≥ 0.6.31 under Admin
@@ -150,19 +171,6 @@ generate one on first run (stored owner-only next to the index, path
 printed at startup). Bind loopback or a private tailnet address only: the
 server exposes your entire message history to anyone holding the token.
 
-### OpenClaw
-
-```bash
-openclaw mcp add imessage --command /path/to/ai-imessage --arg serve
-openclaw mcp doctor imessage --probe   # verify
-```
-
-or in `~/.openclaw/openclaw.json`:
-
-```json
-{ "mcp": { "servers": { "imessage": { "command": "/path/to/ai-imessage", "args": ["serve"] } } } }
-```
-
 ## Privacy
 
 - Source database opened with `SQLITE_OPEN_READONLY` + `PRAGMA query_only`, enforced by tests.
@@ -178,7 +186,7 @@ or in `~/.openclaw/openclaw.json`:
   `privacy.allow_remote_embedding_endpoint = true` is set explicitly.
 - Logs and reports never contain message content; `--debug-show-text` is the
   single, explicit, warned exception.
-- API keys are redacted from `config show` output.
+- API keys and the HTTP bearer token are redacted from `config show` output.
 
 ## Development
 
