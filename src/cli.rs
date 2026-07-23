@@ -51,6 +51,8 @@ pub enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Print ready-to-paste MCP client configuration (and the HTTP token)
+    Connect(ConnectArgs),
     /// Inspect configuration
     Config {
         #[command(subcommand)]
@@ -105,6 +107,13 @@ pub struct ServeArgs {
     pub http: Option<String>,
 }
 
+#[derive(Args)]
+pub struct ConnectArgs {
+    /// Print only the HTTP bearer token (for scripting)
+    #[arg(long)]
+    pub token_only: bool,
+}
+
 #[derive(Subcommand)]
 pub enum ServiceCommand {
     /// Install and load the sync agent (runs every service.interval_seconds)
@@ -122,6 +131,18 @@ pub enum ServiceCommand {
             default_missing_value = crate::service::DEFAULT_HTTP_ADDR
         )]
         http: Option<String>,
+    },
+    /// Resume installed agents without reinstalling
+    Start {
+        /// Start only the MCP HTTP server agent
+        #[arg(long)]
+        http_only: bool,
+    },
+    /// Pause agents, keeping them installed (`start` resumes)
+    Stop {
+        /// Stop only the MCP HTTP server agent
+        #[arg(long)]
+        http_only: bool,
     },
     /// Unload agents and remove their plists
     Uninstall {
@@ -152,6 +173,7 @@ pub fn run() -> Result<ExitCode> {
         Command::Search(args) => run_search(&loaded, &args),
         Command::Serve(args) => run_serve(&loaded, &args),
         Command::Service { command } => run_service(&loaded, cli.config.as_deref(), &command),
+        Command::Connect(args) => run_connect(&loaded, &args),
         Command::Config { command } => run_config(&loaded, &command),
     }
 }
@@ -363,8 +385,63 @@ fn run_service(
         ServiceCommand::Install { no_load, http } => {
             crate::service::install(loaded, explicit_config, *no_load, http.as_deref())?
         }
+        ServiceCommand::Start { http_only } => crate::service::start(*http_only)?,
+        ServiceCommand::Stop { http_only } => crate::service::stop(*http_only)?,
         ServiceCommand::Uninstall { http_only } => crate::service::uninstall(*http_only)?,
         ServiceCommand::Status => crate::service::status(loaded)?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Everything an MCP client needs, ready to paste. The token IS printed —
+/// that is the point of the command; it never leaves this terminal unless
+/// the user pastes it somewhere.
+fn run_connect(loaded: &LoadedConfig, args: &ConnectArgs) -> Result<ExitCode> {
+    let token = match &loaded.config.service.http_token {
+        Some(t) => t.clone(),
+        None => load_or_create_http_token(&loaded.config.index_dir()?)?,
+    };
+    if args.token_only {
+        println!("{token}");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let binary = std::env::current_exe()?;
+    let stdio = serde_json::json!({
+        "mcpServers": {
+            "imessage": { "command": binary, "args": ["serve"] }
+        }
+    });
+    println!("MCP over stdio — Claude Desktop, LM Studio, Codex, …:\n");
+    println!("{}\n", serde_json::to_string_pretty(&stdio)?);
+
+    match crate::service::installed_http_addr()? {
+        Some(addr) => {
+            let http = serde_json::json!({
+                "mcpServers": {
+                    "imessage": {
+                        "url": format!("http://{addr}/mcp"),
+                        "headers": { "Authorization": format!("Bearer {token}") }
+                    }
+                }
+            });
+            println!("MCP over HTTP — served persistently at http://{addr}/mcp:");
+            println!("(check it is running: ai-imessage service status)\n");
+            println!("{}\n", serde_json::to_string_pretty(&http)?);
+            println!(
+                "bearer token: {token}\n\
+                 For access beyond this machine, front the loopback server \
+                 with a private proxy (e.g. `tailscale serve --bg --https=8443 \
+                 http://{addr}`) and use that https URL instead."
+            );
+        }
+        None => {
+            println!(
+                "MCP over HTTP: not enabled. Opt in with\n  \
+                 ai-imessage service install --http\nthen re-run \
+                 `ai-imessage connect` for the URL, token, and JSON."
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

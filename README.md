@@ -64,8 +64,10 @@ only, never message content.
 | `ai-imessage serve --http ADDR` | MCP over streamable HTTP with bearer-token auth (for Open WebUI, remote/mobile MCP clients) |
 | `ai-imessage service install` | Install a launchd agent that runs `etl` every `service.interval_seconds` (default 300). `--no-load` writes the plist without loading |
 | `ai-imessage service install --http [ADDR]` | Opt-in: ALSO keep the MCP HTTP server running persistently (default `127.0.0.1:8787`). Opt back out with `service uninstall --http-only` |
+| `ai-imessage service start` / `stop` | Pause and resume installed agents without uninstalling (`--http-only` scopes to the HTTP server) |
 | `ai-imessage service status` | Agent state and the tail of its log |
 | `ai-imessage service uninstall` | Unload the agent and remove its plist |
+| `ai-imessage connect` | Ready-to-paste MCP client JSON for stdio and HTTP, plus the bearer token (`--token-only` for scripting) |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 
@@ -79,6 +81,9 @@ the full schema and defaults.
 Run `ai-imessage etl` once first so there is an index to serve, and
 replace `/path/to/ai-imessage` below with your binary's absolute path
 (e.g. `$(pwd)/target/release/ai-imessage` from a source build).
+
+The fastest path: `ai-imessage connect` prints ready-to-paste JSON with
+the real paths, URL, and bearer token filled in for both transports.
 
 Four read-only tools are exposed:
 
@@ -192,7 +197,9 @@ background service (nothing listens unless you ask):
 
 ```bash
 ai-imessage service install --http            # loopback, 127.0.0.1:8787
-ai-imessage service uninstall --http-only     # opt back out later
+ai-imessage connect                           # client JSON + bearer token
+ai-imessage service stop --http-only          # pause (start resumes)
+ai-imessage service uninstall --http-only     # opt back out entirely
 ```
 
 #### Example: phone access over Tailscale

@@ -224,8 +224,7 @@ pub fn install(
         )?;
         println!(
             "MCP HTTP server kept running at http://{addr}/mcp\n\
-             every request needs the bearer token (config service.http_token, \
-             or the generated one next to the index)"
+             run `ai-imessage connect` for the client JSON and bearer token"
         );
         if !addr.starts_with("127.0.0.1") && !addr.starts_with("localhost") {
             println!(
@@ -244,6 +243,72 @@ pub fn install(
         binary.display()
     );
     Ok(())
+}
+
+/// Agents that are installed (plist present), optionally restricted to
+/// the HTTP server agent.
+fn installed_agents(http_only: bool) -> Result<Vec<(&'static str, PathBuf)>> {
+    let mut all = vec![(SERVE_LABEL, serve_plist_path()?)];
+    if !http_only {
+        all.insert(0, (LABEL, plist_path()?));
+    }
+    Ok(all.into_iter().filter(|(_, p)| p.exists()).collect())
+}
+
+/// Load installed agents into launchd (without reinstalling anything).
+pub fn start(http_only: bool) -> Result<()> {
+    let agents = installed_agents(http_only)?;
+    if agents.is_empty() {
+        bail!("nothing to start — run `ai-imessage service install` first");
+    }
+    let uid = uid()?;
+    for (label, plist) in agents {
+        let _ = launchctl(&["bootout", &format!("gui/{uid}/{label}")]);
+        let out = launchctl(&[
+            "bootstrap",
+            &format!("gui/{uid}"),
+            &plist.display().to_string(),
+        ])?;
+        if !out.status.success() {
+            bail!(
+                "launchctl bootstrap failed for {label}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        println!("started {label}");
+    }
+    Ok(())
+}
+
+/// Unload agents from launchd but keep them installed; `service start`
+/// resumes them, and they do not return at reboot until then.
+pub fn stop(http_only: bool) -> Result<()> {
+    let agents = installed_agents(http_only)?;
+    if agents.is_empty() {
+        println!("nothing to stop — no agents installed");
+        return Ok(());
+    }
+    let uid = uid()?;
+    for (label, _) in agents {
+        let _ = launchctl(&["bootout", &format!("gui/{uid}/{label}")]);
+        println!("stopped {label} (still installed; `ai-imessage service start` resumes)");
+    }
+    Ok(())
+}
+
+/// The `--http ADDR` baked into the installed serve agent, if any.
+pub fn installed_http_addr() -> Result<Option<String>> {
+    let plist = serve_plist_path()?;
+    let Ok(content) = fs::read_to_string(&plist) else {
+        return Ok(None);
+    };
+    Ok(parse_http_addr(&content))
+}
+
+fn parse_http_addr(plist: &str) -> Option<String> {
+    let after = plist.split("<string>--http</string>").nth(1)?;
+    let addr = after.split("<string>").nth(1)?.split("</string>").next()?;
+    Some(addr.trim().to_string())
 }
 
 /// Remove agents. `http_only` opts back out of just the HTTP server,
@@ -382,6 +447,20 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(!plist.contains("<key>StartInterval</key>"));
         assert!(plist.contains("<string>/tmp/serve.log</string>"));
+    }
+
+    #[test]
+    fn http_addr_round_trips_through_the_plist() {
+        let plist = render_serve_plist(Path::new("/b"), "100.99.98.97:9000", Path::new("/l"), None);
+        assert_eq!(
+            parse_http_addr(&plist).as_deref(),
+            Some("100.99.98.97:9000")
+        );
+        // A sync-agent plist has no --http at all.
+        assert_eq!(
+            parse_http_addr(&render_plist(Path::new("/b"), 300, Path::new("/l"), None)),
+            None
+        );
     }
 
     #[test]

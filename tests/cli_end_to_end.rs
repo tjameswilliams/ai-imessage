@@ -575,6 +575,101 @@ fn http_agent_is_opt_in_and_can_be_removed_alone() {
     assert!(etl_plist.exists(), "sync agent must survive --http-only");
 }
 
+/// Config with a pinned HTTP token, for `connect` assertions.
+fn write_config_with_token(fixture_db: &Path, dir: &Path) -> PathBuf {
+    let config_path = write_config(fixture_db, dir);
+    let mut raw = std::fs::read_to_string(&config_path).unwrap();
+    raw.push_str("\n[service]\nhttp_token = \"cli-test-token\"\n");
+    std::fs::write(&config_path, raw).unwrap();
+    config_path
+}
+
+#[test]
+fn connect_prints_stdio_json_and_http_optin_hint() {
+    let f = populated_fixture();
+    let config = write_config_with_token(&f.db_path, f.dir.path());
+    let fake_home = f.dir.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // No HTTP agent installed: stdio JSON plus the opt-in hint.
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "connect"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(r#""mcpServers""#)
+                .and(predicate::str::contains(r#""args": ["#))
+                .and(predicate::str::contains(r#""serve""#))
+                .and(predicate::str::contains("service install --http")),
+        );
+
+    // With the HTTP agent installed: URL, auth header, and the token.
+    cmd()
+        .env("HOME", &fake_home)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "service",
+            "install",
+            "--no-load",
+            "--http",
+        ])
+        .assert()
+        .success();
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "connect"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(r#""url": "http://127.0.0.1:8787/mcp""#)
+                .and(predicate::str::contains(
+                    r#""Authorization": "Bearer cli-test-token""#,
+                ))
+                .and(predicate::str::contains("bearer token: cli-test-token")),
+        );
+}
+
+#[test]
+fn connect_token_only_prints_just_the_token() {
+    let f = populated_fixture();
+    let config = write_config_with_token(&f.db_path, f.dir.path());
+
+    cmd()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "connect",
+            "--token-only",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("cli-test-token\n"));
+}
+
+#[test]
+fn service_start_without_agents_fails_and_stop_is_tolerant() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+    let fake_home = f.dir.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "service", "start"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing to start"));
+
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "service", "stop"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to stop"));
+}
+
 #[test]
 fn version_flag_works() {
     cmd()
