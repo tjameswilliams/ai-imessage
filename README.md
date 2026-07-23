@@ -32,33 +32,101 @@ brew install tjameswilliams/tap/ai-imessage
 
 or from source: `cargo install --path .` (puts the binary in `~/.cargo/bin`).
 
-**New here? Follow [the recommended path](docs/recommended-path.md)** —
-the tested route from install to phone access, including every gotcha.
+## The happy path
 
-## Quick start
+The tested route from zero to "my AI can search my messages — even from
+my phone." (Deeper background and troubleshooting:
+[the recommended path](docs/recommended-path.md).)
 
-```bash
-ai-imessage doctor          # diagnose access & permissions
-ai-imessage etl --dry-run   # count what's readable, write nothing
-ai-imessage etl             # sync messages into the local index
-ai-imessage search pizza    # keyword search over your history
-ai-imessage search --semantic "plans for the weekend"
-```
-
-`doctor` will walk you through granting Full Disk Access, which macOS
-requires for any app reading `~/Library/Messages/chat.db`.
-
-To keep the index fresh automatically, install the background agent:
+### Step 1 — Install and build your index
 
 ```bash
-./target/release/ai-imessage service install
+brew install tjameswilliams/tap/ai-imessage
+ai-imessage doctor
 ```
 
-macOS attributes Full Disk Access to whatever launchd runs, so the
-**binary itself** must be added under System Settings → Privacy &
-Security → Full Disk Access (the install command prints the exact path).
-`service status` shows the agent state and its recent log — sync reports
-only, never message content.
+`doctor` will fail until your **terminal app** has Full Disk Access
+(System Settings → Privacy & Security → Full Disk Access) — macOS
+requires it for anything that reads `~/Library/Messages/chat.db`. When
+all checks pass:
+
+```bash
+ai-imessage etl                      # first sync: full history + local embeddings
+ai-imessage search "dinner plans"    # try it
+```
+
+### Step 2 — Keep it synced and serve MCP
+
+```bash
+ai-imessage service install --http
+```
+
+This installs two background agents: a sync every 5 minutes and a
+persistent MCP server on `127.0.0.1:8787` (loopback only). Then grant
+Full Disk Access to the **binary itself** — launchd runs it directly, so
+your terminal's grant doesn't apply:
+
+> System Settings → Privacy & Security → Full Disk Access → add
+> `/opt/homebrew/opt/ai-imessage/bin/ai-imessage`
+
+Confirm with `ai-imessage service status` (a sync report should replace
+any permission error within 5 minutes). Signed releases keep this grant
+across upgrades.
+
+### Step 3 — Connect LM Studio (desktop)
+
+```bash
+ai-imessage connect
+```
+
+Copy the **stdio** JSON block it prints into LM Studio's `mcp.json`
+(Program tab in the right sidebar → Install → Edit `mcp.json`, or edit
+`~/.lmstudio/mcp.json` directly). Toggle the server on and the four
+tools appear for any loaded model.
+
+### Step 4 — Connect Open WebUI
+
+Open WebUI (≥ 0.6.31) speaks MCP over streamable HTTP. In **Admin
+Settings → External Tools → Add server (MCP)**:
+
+- URL: `http://127.0.0.1:8787/mcp` — or, if Open WebUI runs in Docker,
+  `http://host.docker.internal:8787/mcp` (loopback inside a container is
+  the container, not your Mac)
+- Auth: Bearer token from `ai-imessage connect --token-only`
+
+### Step 5 — Secure mobile access (Tailscale + Cumbersome)
+
+1. Install [Tailscale](https://tailscale.com) on the Mac and your phone,
+   signed into the same tailnet.
+2. Publish the MCP server to your tailnet with TLS (loopback stays the
+   only real listener):
+
+   ```bash
+   tailscale serve --bg --https=8443 http://127.0.0.1:8787
+   ```
+
+3. For on-Mac inference, do the same for LM Studio's API server, then
+   disable LM Studio's "Serve on Local Network" so port 1234 is
+   loopback-only:
+
+   ```bash
+   tailscale serve --bg --https=8444 http://127.0.0.1:1234
+   ```
+
+4. Run `ai-imessage connect` again — it detects the proxy and prints a
+   tailnet JSON block (`https://<your-mac>.<tailnet>.ts.net:8443/mcp`
+   with the auth header filled in). Paste it into Cumbersome's remote
+   MCP settings (Cumbersome ≥ 1.56).
+5. In Cumbersome, add the inference endpoint as a custom
+   OpenAI-compatible provider:
+   `https://<your-mac>.<tailnet>.ts.net:8444/v1` with your **LM Studio
+   API token** (from LM Studio's developer settings).
+
+Mind the two different tokens: the MCP bearer token
+(`connect --token-only`) authenticates the tools; the LM Studio API
+token authenticates inference. HTTPS via `tailscale serve` is not
+optional on iOS — App Transport Security rejects plain-http endpoints
+with a TLS error.
 
 ## Commands
 
@@ -256,9 +324,10 @@ cargo llvm-cov --summary-only   # coverage (cargo install cargo-llvm-cov)
 Tests run against synthetic Messages databases in `tests/common/` — no test
 ever touches a real `chat.db`.
 
-Releases are signed: `scripts/release.sh <version>` builds, signs with a
-Developer ID identity (hardened runtime + timestamp), optionally
-notarizes, and uploads the artifact. If you build from source and use the
+Releases are signed and notarized — the full cycle is documented in
+[docs/releasing.md](docs/releasing.md). `scripts/release.sh <version>`
+builds, signs with a Developer ID identity (hardened runtime +
+timestamp), optionally notarizes, and uploads the artifact. If you build from source and use the
 background agents, re-sign your binary with any stable identity after
 each rebuild (`codesign -f -s "<identity>" ~/.cargo/bin/ai-imessage`) so
 its Full Disk Access grant survives rebuilds. The typedstream parser is a clean-room
