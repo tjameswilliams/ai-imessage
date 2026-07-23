@@ -67,7 +67,7 @@ only, never message content.
 | `ai-imessage service start` / `stop` | Pause and resume installed agents without uninstalling (`--http-only` scopes to the HTTP server) |
 | `ai-imessage service status` | Agent state and the tail of its log |
 | `ai-imessage service uninstall` | Unload the agent and remove its plist |
-| `ai-imessage connect` | Ready-to-paste MCP client JSON for stdio and HTTP, plus the bearer token (`--token-only` for scripting) |
+| `ai-imessage connect` | Ready-to-paste MCP client JSON for stdio and HTTP, plus the bearer token (`--token-only` for scripting). Detects a running Tailscale (installed CLI + `tailscale serve` proxy or tailnet bind) and prints the tailnet JSON too |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 
@@ -210,7 +210,7 @@ exposure with TLS (Tailscale is one deployment option, not a dependency):
 ```bash
 ai-imessage service install --http
 tailscale serve --bg --https=8443 http://127.0.0.1:8787
-# clients use https://<your-mac>.<tailnet>.ts.net:8443/mcp + the bearer token
+ai-imessage connect   # detects the proxy, prints the tailnet JSON ready to paste
 ```
 
 Mobile MCP clients (e.g. Cumbersome ≥ 1.56 with its remote MCP support)
