@@ -63,6 +63,7 @@ only, never message content.
 | `ai-imessage serve` | MCP server over stdio for Claude Code / Claude Desktop |
 | `ai-imessage serve --http ADDR` | MCP over streamable HTTP with bearer-token auth (for Open WebUI, remote/mobile MCP clients) |
 | `ai-imessage service install` | Install a launchd agent that runs `etl` every `service.interval_seconds` (default 300). `--no-load` writes the plist without loading |
+| `ai-imessage service install --http [ADDR]` | Opt-in: ALSO keep the MCP HTTP server running persistently (default `127.0.0.1:8787`). Opt back out with `service uninstall --http-only` |
 | `ai-imessage service status` | Agent state and the tail of its log |
 | `ai-imessage service uninstall` | Unload the agent and remove its plist |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
@@ -185,6 +186,29 @@ mode. Set it via `[service].http_token` in the config, or let the server
 generate one on first run (stored owner-only next to the index, path
 printed at startup). Bind loopback or a private tailnet address only: the
 server exposes your entire message history to anyone holding the token.
+
+To keep the HTTP server running permanently, opt in when installing the
+background service (nothing listens unless you ask):
+
+```bash
+ai-imessage service install --http            # loopback, 127.0.0.1:8787
+ai-imessage service uninstall --http-only     # opt back out later
+```
+
+#### Example: phone access over Tailscale
+
+Keep the server on loopback and let `tailscale serve` add tailnet-only
+exposure with TLS (Tailscale is one deployment option, not a dependency):
+
+```bash
+ai-imessage service install --http
+tailscale serve --bg --https=8443 http://127.0.0.1:8787
+# clients use https://<your-mac>.<tailnet>.ts.net:8443/mcp + the bearer token
+```
+
+Mobile MCP clients (e.g. Cumbersome ≥ 1.56 with its remote MCP support)
+can then call the tools directly, pairing with any model backend — such
+as LM Studio's OpenAI-compatible server on the same Mac.
 
 ## Privacy
 

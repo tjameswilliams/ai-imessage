@@ -107,15 +107,29 @@ pub struct ServeArgs {
 
 #[derive(Subcommand)]
 pub enum ServiceCommand {
-    /// Install and load the agent (syncs every service.interval_seconds)
+    /// Install and load the sync agent (runs every service.interval_seconds)
     Install {
-        /// Write the plist without loading it into launchd
+        /// Write plists without loading them into launchd
         #[arg(long)]
         no_load: bool,
+
+        /// ALSO keep the MCP HTTP server running (opt-in; bearer-token
+        /// auth; ADDR defaults to 127.0.0.1:8787)
+        #[arg(
+            long,
+            value_name = "ADDR",
+            num_args = 0..=1,
+            default_missing_value = crate::service::DEFAULT_HTTP_ADDR
+        )]
+        http: Option<String>,
     },
-    /// Unload the agent and remove its plist
-    Uninstall,
-    /// Show whether the agent is installed, loaded, and its recent log
+    /// Unload agents and remove their plists
+    Uninstall {
+        /// Remove only the MCP HTTP server agent, keeping the sync agent
+        #[arg(long)]
+        http_only: bool,
+    },
+    /// Show whether the agents are installed, loaded, and their recent logs
     Status,
 }
 
@@ -346,10 +360,10 @@ fn run_service(
     command: &ServiceCommand,
 ) -> Result<ExitCode> {
     match command {
-        ServiceCommand::Install { no_load } => {
-            crate::service::install(loaded, explicit_config, *no_load)?
+        ServiceCommand::Install { no_load, http } => {
+            crate::service::install(loaded, explicit_config, *no_load, http.as_deref())?
         }
-        ServiceCommand::Uninstall => crate::service::uninstall()?,
+        ServiceCommand::Uninstall { http_only } => crate::service::uninstall(*http_only)?,
         ServiceCommand::Status => crate::service::status(loaded)?,
     }
     Ok(ExitCode::SUCCESS)

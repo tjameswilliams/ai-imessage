@@ -473,7 +473,10 @@ fn service_install_writes_plist_and_status_reports_it() {
         .args(["--config", config.to_str().unwrap(), "service", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("installed:").and(predicate::str::contains("NOT loaded")));
+        // Load state is queried from the machine's real launchd (a developer
+        // may genuinely have the agent running), so assert only on install
+        // state, which the fake HOME fully controls.
+        .stdout(predicate::str::contains("com.ai-imessage.etl: installed"));
 
     // Uninstall removes the plist (bootout failure for a never-loaded
     // label is tolerated).
@@ -484,6 +487,92 @@ fn service_install_writes_plist_and_status_reports_it() {
         .success()
         .stdout(predicate::str::contains("removed"));
     assert!(!plist_path.exists());
+}
+
+#[test]
+fn http_agent_is_opt_in_and_can_be_removed_alone() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+    let fake_home = f.dir.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    let etl_plist = fake_home.join("Library/LaunchAgents/com.ai-imessage.etl.plist");
+    let serve_plist = fake_home.join("Library/LaunchAgents/com.ai-imessage.serve.plist");
+
+    // Plain install: no HTTP agent, and status offers the opt-in.
+    cmd()
+        .env("HOME", &fake_home)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "service",
+            "install",
+            "--no-load",
+        ])
+        .assert()
+        .success();
+    assert!(etl_plist.exists());
+    assert!(!serve_plist.exists(), "HTTP agent must be opt-in");
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "service", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("opt in with"));
+
+    // Opting in later: --http with no value uses the loopback default.
+    cmd()
+        .env("HOME", &fake_home)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "service",
+            "install",
+            "--no-load",
+            "--http",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("http://127.0.0.1:8787/mcp"));
+    let plist = std::fs::read_to_string(&serve_plist).unwrap();
+    assert!(plist.contains("<string>serve</string>"));
+    assert!(plist.contains("<string>127.0.0.1:8787</string>"));
+    assert!(plist.contains("<key>KeepAlive</key>"));
+
+    // A custom address (e.g. a tailnet IP) is baked in and warned about.
+    cmd()
+        .env("HOME", &fake_home)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "service",
+            "install",
+            "--no-load",
+            "--http",
+            "100.99.98.97:9000",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not loopback"));
+    assert!(
+        std::fs::read_to_string(&serve_plist)
+            .unwrap()
+            .contains("<string>100.99.98.97:9000</string>")
+    );
+
+    // Opting back out removes only the HTTP agent.
+    cmd()
+        .env("HOME", &fake_home)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "service",
+            "uninstall",
+            "--http-only",
+        ])
+        .assert()
+        .success();
+    assert!(!serve_plist.exists());
+    assert!(etl_plist.exists(), "sync agent must survive --http-only");
 }
 
 #[test]
