@@ -156,6 +156,28 @@ fn launchctl(args: &[&str]) -> Result<std::process::Output> {
         .context("could not run launchctl")
 }
 
+/// Bootstrap with retries: right after a bootout, launchd may not have
+/// fully released the old instance (or its listening port), making an
+/// immediate bootstrap fail transiently.
+fn bootstrap_with_retry(uid: &str, label: &str, plist: &Path) -> Result<()> {
+    let mut last = String::new();
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let out = launchctl(&[
+            "bootstrap",
+            &format!("gui/{uid}"),
+            &plist.display().to_string(),
+        ])?;
+        if out.status.success() {
+            return Ok(());
+        }
+        last = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    }
+    bail!("launchctl bootstrap failed for {label}: {last}");
+}
+
 fn write_and_load(plist: &Path, content: &str, label: &str, no_load: bool) -> Result<()> {
     if let Some(dir) = plist.parent() {
         fs::create_dir_all(dir)?;
@@ -168,17 +190,7 @@ fn write_and_load(plist: &Path, content: &str, label: &str, no_load: bool) -> Re
     let uid = uid()?;
     // Reload cleanly if an older agent is already bootstrapped.
     let _ = launchctl(&["bootout", &format!("gui/{uid}/{label}")]);
-    let out = launchctl(&[
-        "bootstrap",
-        &format!("gui/{uid}"),
-        &plist.display().to_string(),
-    ])?;
-    if !out.status.success() {
-        bail!(
-            "launchctl bootstrap failed for {label}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+    bootstrap_with_retry(&uid, label, plist)?;
     println!("loaded {label}");
     Ok(())
 }
@@ -264,17 +276,7 @@ pub fn start(http_only: bool) -> Result<()> {
     let uid = uid()?;
     for (label, plist) in agents {
         let _ = launchctl(&["bootout", &format!("gui/{uid}/{label}")]);
-        let out = launchctl(&[
-            "bootstrap",
-            &format!("gui/{uid}"),
-            &plist.display().to_string(),
-        ])?;
-        if !out.status.success() {
-            bail!(
-                "launchctl bootstrap failed for {label}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
+        bootstrap_with_retry(&uid, label, &plist)?;
         println!("started {label}");
     }
     Ok(())
