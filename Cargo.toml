@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Local-first Apple Messages RAG index and MCP server"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/timwilliams/ai-imessage"
+repository = "https://github.com/tjameswilliams/ai-imessage"
 keywords = ["imessage", "mcp", "rag", "macos", "search"]
 categories = ["command-line-utilities"]
 
