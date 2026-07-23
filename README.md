@@ -2,14 +2,39 @@
 
 ![ai-imessage — local-first Apple Messages search for AI agents](assets/header.jpg)
 
-Local-first Apple Messages RAG for AI agents. Indexes your Messages history
-into a private local database and exposes read-only search to MCP clients
-like Claude Code, Claude Desktop, and LM Studio.
+**Want an AI assistant that actually knows your text messages — without
+shipping a decade of your most private conversations to OpenAI?**
+Here's the way.
 
-**Everything stays on your machine.** The Apple Messages database is only
-ever opened read-only; the index, embeddings, and search never leave your
-Mac unless you explicitly configure a remote embedding endpoint (off by
-default).
+Your Messages history is the most personal dataset you own: family,
+money, health, plans, every relationship you have. It's also exactly
+what makes an AI assistant genuinely useful:
+
+> *"When did I last talk to Jaina, and about what?"*
+> *"What did Melissa and I decide about the trip?"*
+> *"Catch me up on the group chat — what am I on the hook for?"*
+
+The usual price for that is uploading everything to someone else's
+cloud. ai-imessage refuses the trade. It indexes your Apple Messages
+history into a private database **on your Mac** and serves read-only
+search tools to any AI you point at it over MCP — including a model
+running entirely on the same machine:
+
+- **Fully local, end to end.** Pair it with LM Studio (or any local
+  model) and the entire loop — indexing, embeddings, retrieval, and the
+  AI itself — runs on hardware you own. No OpenAI. No Anthropic. No
+  cloud. Verifiably: there is no telemetry, and the only network access
+  in the default configuration is a one-time public model download that
+  contains none of your data.
+- **Read-only by construction.** The Messages database is opened
+  read-only with a second enforcement layer at the SQL level, backed by
+  tests. The index is owner-only on disk; the search server can never
+  write and requires a bearer token on every HTTP request.
+- **Your phone, your network.** Take it mobile over your own private
+  tailnet with TLS — not through anyone's relay.
+- **Cloud AI only if — and when — you choose it.** The same tools plug
+  into Claude Desktop, Claude Code, Codex, and friends. That's a
+  decision you make per client, not a default made for you.
 
 ## Status
 
