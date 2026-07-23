@@ -192,6 +192,9 @@ pub struct RecentMessage {
     pub sender: String,
     pub text: String,
     pub sent_at_ms: i64,
+    /// True when the sender is one of the contact handles the listing was
+    /// scoped to (always false for chat-scoped and unscoped listings).
+    pub from_contact: bool,
 }
 
 /// Quote every whitespace-separated term so user input is always a valid
@@ -631,6 +634,84 @@ impl IndexDb {
         Ok(rows)
     }
 
+    /// Direct (non-group) chats in which any of these handles has sent a
+    /// message.
+    pub fn direct_chats_for_handles(&self, handle_ids: &[i64]) -> Result<Vec<i64>, IndexError> {
+        if handle_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = in_list(handle_ids);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT m.chat_id FROM messages m
+             JOIN chats c ON c.id = m.chat_id
+             WHERE m.sender_id IN ({list}) AND c.is_group = 0"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The conversation between the user and a contact, newest first:
+    /// messages the contact sent (in any chat, groups included) plus
+    /// messages the user sent in direct chats with them. Third-party
+    /// group traffic is excluded — it is not "talking to" the contact.
+    pub fn contact_messages(
+        &self,
+        handle_ids: &[i64],
+        direct_chat_ids: &[i64],
+        limit: u32,
+    ) -> Result<Vec<RecentMessage>, IndexError> {
+        if handle_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let handles = in_list(handle_ids);
+        let mine = if direct_chat_ids.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "OR (m.is_from_me = 1 AND m.chat_id IN ({}))",
+                in_list(direct_chat_ids)
+            )
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT
+               COALESCE(
+                 NULLIF(c.display_name, ''),
+                 (SELECT COALESCE(h2.display_name, h2.handle)
+                     FROM messages m2 JOIN handles h2 ON h2.id = m2.sender_id
+                     WHERE m2.chat_id = c.id LIMIT 1),
+                 c.guid
+               ),
+               CASE WHEN m.is_from_me THEN 'Me'
+                    ELSE COALESCE(h.display_name, h.handle, 'unknown') END,
+               m.text,
+               m.sent_at_ms,
+               COALESCE(m.sender_id IN ({handles}), 0)
+             FROM messages m
+             JOIN chats c ON c.id = m.chat_id
+             LEFT JOIN handles h ON h.id = m.sender_id
+             WHERE m.text IS NOT NULL
+               AND m.is_system_event = 0
+               AND m.sent_at_ms IS NOT NULL
+               AND (m.sender_id IN ({handles}) {mine})
+             ORDER BY m.sent_at_ms DESC, m.id DESC
+             LIMIT ?1"
+        ))?;
+        let rows = stmt
+            .query_map([limit], |r| {
+                Ok(RecentMessage {
+                    chat_label: r.get(0)?,
+                    sender: r.get(1)?,
+                    text: r.get(2)?,
+                    sent_at_ms: r.get(3)?,
+                    from_contact: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Chat ids whose label matches a case-insensitive substring.
     pub fn chats_matching_label(&self, filter: &str) -> Result<Vec<i64>, IndexError> {
         let mut stmt = self.conn.prepare_cached(
@@ -694,6 +775,7 @@ impl IndexDb {
                     sender: r.get(1)?,
                     text: r.get(2)?,
                     sent_at_ms: r.get(3)?,
+                    from_contact: false,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

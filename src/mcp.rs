@@ -187,57 +187,113 @@ impl McpServer {
             .map(|n| n.clamp(1, 200) as u32)
             .unwrap_or(25);
 
-        let mut header = String::new();
-        let chat_ids: Option<Vec<i64>> = match (contact, chat) {
-            (Some(who), _) => {
-                let matches = self.index.find_handles(who)?;
-                if matches.is_empty() {
-                    return Ok(format!(
-                        "No contact or handle matching \"{who}\". Try list_chats \
-                         to see who exists in the index."
-                    ));
-                }
-                let mut names: Vec<String> = matches
-                    .iter()
-                    .map(|m| m.display_name.clone().unwrap_or_else(|| m.handle.clone()))
-                    .collect();
-                names.sort();
-                names.dedup();
-                if names.len() > 4 {
-                    return Ok(format!(
-                        "\"{who}\" is ambiguous — it matches {}: {}. Call again \
-                         with a more specific contact.",
-                        names.len(),
-                        names.join(", ")
-                    ));
-                }
-                let handles: Vec<String> = matches.iter().map(|m| m.handle.clone()).collect();
-                header = format!("Contact: {} ({})\n", names.join(", "), handles.join(", "));
-                let ids: Vec<i64> = matches.iter().map(|m| m.id).collect();
-                Some(self.index.chats_for_handles(&ids)?)
-            }
-            (None, Some(label)) => {
+        if let Some(who) = contact {
+            return self.recent_with_contact(who, limit);
+        }
+
+        let chat_ids: Option<Vec<i64>> = match chat {
+            Some(label) => {
                 let ids = self.index.chats_matching_label(label)?;
                 if ids.is_empty() {
                     return Ok(format!("No chat matching \"{label}\"."));
                 }
                 Some(ids)
             }
-            (None, None) => None,
+            None => None,
         };
-
         let mut messages = self.index.recent_messages(chat_ids.as_deref(), limit)?;
         let Some(latest) = messages.first() else {
             return Ok("No messages found in that scope.".into());
         };
-        header.push_str(&format!(
+        let mut out = format!(
             "Most recent message: [{}] in \"{}\"\n\nLast {} message(s), oldest to newest:\n",
             format_ms(Some(latest.sent_at_ms)),
             latest.chat_label,
             messages.len(),
+        );
+        messages.reverse();
+        for m in &messages {
+            out.push_str(&format!(
+                "[{}] {} • {}: {}\n",
+                format_ms(Some(m.sent_at_ms)),
+                m.chat_label,
+                m.sender,
+                m.text
+            ));
+        }
+        Ok(out)
+    }
+
+    /// The contact-scoped recency view: the conversation BETWEEN the user
+    /// and this person (their messages anywhere, the user's messages in
+    /// their direct chats), with the headline facts stated up front so
+    /// "when did I last talk to X" needs no inference.
+    fn recent_with_contact(&mut self, who: &str, limit: u32) -> Result<String> {
+        let matches = self.index.find_handles(who)?;
+        if matches.is_empty() {
+            return Ok(format!(
+                "No contact or handle matching \"{who}\". Try list_chats to \
+                 see who exists in the index."
+            ));
+        }
+        let mut names: Vec<String> = matches
+            .iter()
+            .map(|m| m.display_name.clone().unwrap_or_else(|| m.handle.clone()))
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.len() > 4 {
+            return Ok(format!(
+                "\"{who}\" is ambiguous — it matches {}: {}. Call again with a \
+                 more specific contact.",
+                names.len(),
+                names.join(", ")
+            ));
+        }
+        let handles: Vec<String> = matches.iter().map(|m| m.handle.clone()).collect();
+        let ids: Vec<i64> = matches.iter().map(|m| m.id).collect();
+        let direct = self.index.direct_chats_for_handles(&ids)?;
+        let mut messages = self.index.contact_messages(&ids, &direct, limit)?;
+        if messages.is_empty() {
+            return Ok(format!(
+                "No messages exchanged with {} in the index.",
+                names.join(", ")
+            ));
+        }
+
+        let brief = |m: &crate::index::RecentMessage| {
+            let text: String = m.text.chars().take(120).collect();
+            let ellipsis = if m.text.chars().count() > 120 {
+                "…"
+            } else {
+                ""
+            };
+            format!(
+                "[{}] in \"{}\": {text}{ellipsis}",
+                format_ms(Some(m.sent_at_ms)),
+                m.chat_label
+            )
+        };
+        let mut out = format!("Contact: {} ({})\n", names.join(", "), handles.join(", "));
+        match messages.iter().find(|m| m.from_contact) {
+            Some(m) => out.push_str(&format!("Last message from them: {}\n", brief(m))),
+            None => out.push_str("Last message from them: none in the index\n"),
+        }
+        match messages.iter().find(|m| !m.from_contact) {
+            Some(m) => out.push_str(&format!("Last message from you to them: {}\n", brief(m))),
+            None if direct.is_empty() => out.push_str(
+                "Last message from you to them: no direct chat exists; only \
+                 their messages in shared group chats are shown\n",
+            ),
+            None => out.push_str("Last message from you to them: none in the index\n"),
+        }
+
+        out.push_str(&format!(
+            "\nLast {} message(s) between you (their messages in any chat, \
+             yours in direct chats), oldest to newest:\n",
+            messages.len()
         ));
         messages.reverse();
-        let mut out = header;
         for m in &messages {
             out.push_str(&format!(
                 "[{}] {} • {}: {}\n",
@@ -468,12 +524,14 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "get_recent_messages",
-            "description": "The chronological tail of conversation, newest \
-                messages across all relevant chats (direct AND groups), \
-                including messages sent by the user. THE tool for: when \
-                someone was last talked to, what was said most recently, \
-                catching up on a person or chat. Scope by contact name, by \
-                chat, or neither (all chats).",
+            "description": "THE tool for: when someone was last talked to, \
+                what was said most recently, catching up on a person or chat. \
+                With a contact, returns the conversation BETWEEN the user and \
+                that person — their messages in any chat plus the user's \
+                messages in direct chats with them, never third-party group \
+                chatter — and states the last message from them and from the \
+                user up front. With a chat, the newest traffic in that chat. \
+                With neither, the newest messages anywhere.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -195,7 +195,7 @@ fn recency_server() -> (Fixture, McpServer) {
     });
     f.link_chat_message(direct, m1);
 
-    // Her latest message lives in a group chat...
+    // A group message from her...
     let m2 = f.add_message(&MessageSpec {
         guid: "r2",
         text: Some("flights are booked!"),
@@ -205,25 +205,55 @@ fn recency_server() -> (Fixture, McpServer) {
     });
     f.link_chat_message(group, m2);
 
-    // ...and the very last exchange is a from-me message in that group.
+    // ...then the true last direct exchange: her message and my reply.
     let m3 = f.add_message(&MessageSpec {
         guid: "r3",
-        text: Some("amazing, can't wait"),
+        text: Some("the robocalls are out of control lately"),
+        handle_id: Some(jaina),
+        date: apple_ns("2026-05-25T10:12:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(direct, m3);
+    let m4 = f.add_message(&MessageSpec {
+        guid: "r4",
+        text: Some("same!! three today already"),
         is_from_me: true,
         date: apple_ns("2026-05-25T10:30:00Z"),
         ..Default::default()
     });
-    f.link_chat_message(group, m3);
+    f.link_chat_message(direct, m4);
+
+    // NEWER third-party traffic in her group — the noise that previously
+    // became the headline ("Josie laughed at ...").
+    let m5 = f.add_message(&MessageSpec {
+        guid: "r5",
+        text: Some("Laughed at “Or someone dresses up as the hot nurse”"),
+        handle_id: Some(other),
+        associated_message_type: 2003,
+        date: apple_ns("2026-06-21T01:24:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(group, m5);
+
+    // My own message in the group: addressed to the group, not to her.
+    let m6 = f.add_message(&MessageSpec {
+        guid: "r6",
+        text: Some("who is bringing snacks"),
+        is_from_me: true,
+        date: apple_ns("2026-06-22T12:00:00Z"),
+        ..Default::default()
+    });
+    f.link_chat_message(group, m6);
 
     // Unrelated newer traffic that must NOT leak into Jaina's scope.
-    let m4 = f.add_message(&MessageSpec {
-        guid: "r4",
+    let m7 = f.add_message(&MessageSpec {
+        guid: "r7",
         text: Some("totally unrelated chatter"),
         handle_id: Some(other),
         date: apple_ns("2026-07-01T12:00:00Z"),
         ..Default::default()
     });
-    f.link_chat_message(noise, m4);
+    f.link_chat_message(noise, m7);
 
     let contacts = common::build_contacts_dir(
         f.dir.path(),
@@ -246,27 +276,37 @@ fn recency_server() -> (Fixture, McpServer) {
 }
 
 #[test]
-fn recent_messages_reports_the_true_last_contact_across_chats() {
+fn recent_messages_reports_the_true_last_exchange_not_group_noise() {
     let (_f, mut s) = recency_server();
     let result = call(&mut s, "get_recent_messages", json!({"contact": "Jaina"}));
     assert_eq!(result["isError"], false);
     let text = text_of(&result);
 
-    // The headline answer is her real last activity — the from-me group
-    // message — not the old direct conversation.
+    // Headline facts answer "when did I last talk to her" directly: her
+    // last message and my last reply, both from the 5/25 direct exchange.
     assert!(text.contains("Contact: Jaina Proudmoore"), "{text}");
     assert!(
-        text.contains("Most recent message: [2026-05-25 10:30]"),
+        text.contains("Last message from them: [2026-05-25 10:12]"),
         "{text}"
     );
-    // Both her chats appear; unrelated chats do not.
+    assert!(text.contains("robocalls"), "{text}");
+    assert!(
+        text.contains("Last message from you to them: [2026-05-25 10:30]"),
+        "{text}"
+    );
+
+    // Her group messages count as her talking; third-party group traffic
+    // and my group messages do not appear at all.
     assert!(text.contains("flights are booked!"));
-    assert!(text.contains("Me: amazing, can't wait"));
-    assert!(text.contains("happy birthday"));
+    assert!(!text.contains("hot nurse"), "{text}");
+    assert!(!text.contains("who is bringing snacks"), "{text}");
     assert!(!text.contains("unrelated chatter"));
-    // Oldest-to-newest ordering for readability.
-    let birthday = text.find("happy birthday").unwrap();
-    let latest = text.find("amazing, can't wait").unwrap();
+
+    // Oldest-to-newest ordering for readability — checked within the
+    // message list, since the header quotes the newest texts first.
+    let list = text.split("oldest to newest:").nth(1).unwrap();
+    let birthday = list.find("happy birthday").unwrap();
+    let latest = list.find("three today already").unwrap();
     assert!(birthday < latest);
 }
 
