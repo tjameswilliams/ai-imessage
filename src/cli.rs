@@ -46,6 +46,11 @@ pub enum Command {
     Search(SearchArgs),
     /// Serve the index to MCP clients over stdio (default) or HTTP
     Serve(ServeArgs),
+    /// Manage the scheduled background sync (launchd agent)
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Inspect configuration
     Config {
         #[command(subcommand)]
@@ -101,6 +106,20 @@ pub struct ServeArgs {
 }
 
 #[derive(Subcommand)]
+pub enum ServiceCommand {
+    /// Install and load the agent (syncs every service.interval_seconds)
+    Install {
+        /// Write the plist without loading it into launchd
+        #[arg(long)]
+        no_load: bool,
+    },
+    /// Unload the agent and remove its plist
+    Uninstall,
+    /// Show whether the agent is installed, loaded, and its recent log
+    Status,
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Print the effective configuration (secrets redacted)
     Show,
@@ -118,6 +137,7 @@ pub fn run() -> Result<ExitCode> {
         Command::Etl(args) => run_etl(&loaded, &args),
         Command::Search(args) => run_search(&loaded, &args),
         Command::Serve(args) => run_serve(&loaded, &args),
+        Command::Service { command } => run_service(&loaded, cli.config.as_deref(), &command),
         Command::Config { command } => run_config(&loaded, &command),
     }
 }
@@ -316,6 +336,21 @@ fn run_serve(loaded: &LoadedConfig, args: &ServeArgs) -> Result<ExitCode> {
             stdout.write_all(b"\n")?;
             stdout.flush()?;
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_service(
+    loaded: &LoadedConfig,
+    explicit_config: Option<&std::path::Path>,
+    command: &ServiceCommand,
+) -> Result<ExitCode> {
+    match command {
+        ServiceCommand::Install { no_load } => {
+            crate::service::install(loaded, explicit_config, *no_load)?
+        }
+        ServiceCommand::Uninstall => crate::service::uninstall()?,
+        ServiceCommand::Status => crate::service::status(loaded)?,
     }
     Ok(ExitCode::SUCCESS)
 }

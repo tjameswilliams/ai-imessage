@@ -13,7 +13,7 @@ default).
 
 ## Status
 
-Early development. Milestone 6 of 8 (MCP server) is complete:
+Early development. Milestone 7 of 8 (scheduled sync) is complete:
 
 - [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
 - [x] **M2** Normalized destination database, incremental ETL
@@ -21,7 +21,7 @@ Early development. Milestone 6 of 8 (MCP server) is complete:
 - [x] **M4** Local embeddings + vector search
 - [x] **M5** Hybrid retrieval (rank fusion)
 - [x] **M6** MCP server
-- [ ] **M7** Scheduled ETL (LaunchAgent)
+- [x] **M7** Scheduled ETL (LaunchAgent)
 - [ ] **M8** Homebrew release
 
 ## Quick start (from source)
@@ -38,6 +38,18 @@ cargo build --release
 `doctor` will walk you through granting Full Disk Access, which macOS
 requires for any app reading `~/Library/Messages/chat.db`.
 
+To keep the index fresh automatically, install the background agent:
+
+```bash
+./target/release/ai-imessage service install
+```
+
+macOS attributes Full Disk Access to whatever launchd runs, so the
+**binary itself** must be added under System Settings → Privacy &
+Security → Full Disk Access (the install command prints the exact path).
+`service status` shows the agent state and its recent log — sync reports
+only, never message content.
+
 ## Commands
 
 | Command | Purpose |
@@ -50,6 +62,9 @@ requires for any app reading `~/Library/Messages/chat.db`.
 | `ai-imessage search --semantic <terms>` | Embedding similarity only |
 | `ai-imessage serve` | MCP server over stdio for Claude Code / Claude Desktop |
 | `ai-imessage serve --http ADDR` | MCP over streamable HTTP with bearer-token auth (for Open WebUI, remote/mobile MCP clients) |
+| `ai-imessage service install` | Install a launchd agent that runs `etl` every `service.interval_seconds` (default 300). `--no-load` writes the plist without loading |
+| `ai-imessage service status` | Agent state and the tail of its log |
+| `ai-imessage service uninstall` | Unload the agent and remove its plist |
 | `ai-imessage config show` | Print effective config (secrets redacted) |
 | `ai-imessage config path` | Print config file location |
 

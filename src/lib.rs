@@ -21,4 +21,5 @@ pub mod mcp;
 pub mod model;
 pub mod paths;
 pub mod retrieve;
+pub mod service;
 pub mod typedstream;

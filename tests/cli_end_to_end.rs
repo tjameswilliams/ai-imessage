@@ -429,6 +429,64 @@ fn nonexistent_config_flag_fails() {
 }
 
 #[test]
+fn service_install_writes_plist_and_status_reports_it() {
+    let f = populated_fixture();
+    let config = write_config(&f.db_path, f.dir.path());
+    let fake_home = f.dir.path().join("home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+
+    // Status before install: not installed, still exits 0.
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "service", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not installed"));
+
+    // --no-load writes the plist without touching launchd (CI has no
+    // gui domain to bootstrap into).
+    cmd()
+        .env("HOME", &fake_home)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "service",
+            "install",
+            "--no-load",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("com.ai-imessage.etl.plist")
+                .and(predicate::str::contains("Full Disk Access")),
+        );
+
+    let plist_path = fake_home.join("Library/LaunchAgents/com.ai-imessage.etl.plist");
+    let plist = std::fs::read_to_string(&plist_path).unwrap();
+    assert!(plist.contains("<string>etl</string>"));
+    assert!(plist.contains("<string>--config</string>"));
+    assert!(plist.contains(config.to_str().unwrap()));
+    assert!(plist.contains("<integer>300</integer>"));
+
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "service", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed:").and(predicate::str::contains("NOT loaded")));
+
+    // Uninstall removes the plist (bootout failure for a never-loaded
+    // label is tolerated).
+    cmd()
+        .env("HOME", &fake_home)
+        .args(["--config", config.to_str().unwrap(), "service", "uninstall"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed"));
+    assert!(!plist_path.exists());
+}
+
+#[test]
 fn version_flag_works() {
     cmd()
         .arg("--version")
