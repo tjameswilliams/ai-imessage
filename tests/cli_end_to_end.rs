@@ -27,7 +27,11 @@ fn write_config(fixture_db: &Path, dir: &Path) -> PathBuf {
 }
 
 fn cmd() -> Command {
-    Command::cargo_bin("ai-imessage").unwrap()
+    let mut c = Command::cargo_bin("ai-imessage").unwrap();
+    // launchd labels are machine-global even though these tests sandbox
+    // HOME; never let a test bootout/bootstrap a developer's real agents.
+    c.env(ai_imessage::service::NO_LAUNCHCTL_ENV, "1");
+    c
 }
 
 fn populated_fixture() -> Fixture {

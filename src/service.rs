@@ -149,7 +149,22 @@ fn uid() -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Test-only escape hatch: launchd's label namespace is machine-global
+/// while plists are per-HOME, so a test suite operating on a sandboxed
+/// HOME would otherwise bootout/bootstrap the developer's REAL agents.
+/// With this env var set, every launchctl call is skipped and reported
+/// as successful.
+pub const NO_LAUNCHCTL_ENV: &str = "AI_IMESSAGE_NO_LAUNCHCTL";
+
 fn launchctl(args: &[&str]) -> Result<std::process::Output> {
+    if std::env::var_os(NO_LAUNCHCTL_ENV).is_some() {
+        use std::os::unix::process::ExitStatusExt;
+        return Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
+    }
     Command::new("launchctl")
         .args(args)
         .output()
