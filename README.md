@@ -13,7 +13,7 @@ default).
 
 ## Status
 
-Early development. Milestone 7 of 8 (scheduled sync) is complete:
+All eight planned milestones are complete:
 
 - [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
 - [x] **M2** Normalized destination database, incremental ETL
@@ -22,17 +22,24 @@ Early development. Milestone 7 of 8 (scheduled sync) is complete:
 - [x] **M5** Hybrid retrieval (rank fusion)
 - [x] **M6** MCP server
 - [x] **M7** Scheduled ETL (LaunchAgent)
-- [ ] **M8** Homebrew release
+- [x] **M8** Homebrew release
 
-## Quick start (from source)
+## Install
 
 ```bash
-cargo build --release
-./target/release/ai-imessage doctor          # diagnose access & permissions
-./target/release/ai-imessage etl --dry-run   # count what's readable, write nothing
-./target/release/ai-imessage etl             # sync messages into the local index
-./target/release/ai-imessage search pizza    # keyword search over your history
-./target/release/ai-imessage search --semantic "plans for the weekend"
+brew install tjameswilliams/tap/ai-imessage
+```
+
+or from source: `cargo install --path .` (puts the binary in `~/.cargo/bin`).
+
+## Quick start
+
+```bash
+ai-imessage doctor          # diagnose access & permissions
+ai-imessage etl --dry-run   # count what's readable, write nothing
+ai-imessage etl             # sync messages into the local index
+ai-imessage search pizza    # keyword search over your history
+ai-imessage search --semantic "plans for the weekend"
 ```
 
 `doctor` will walk you through granting Full Disk Access, which macOS
