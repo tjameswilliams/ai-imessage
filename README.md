@@ -10,9 +10,9 @@ Your Messages history is the most personal dataset you own: family,
 money, health, plans, every relationship you have. It's also exactly
 what makes an AI assistant genuinely useful:
 
-> *"When did I last talk to Jaina, and about what?"*
-> *"What did Melissa and I decide about the trip?"*
-> *"Catch me up on the group chat — what am I on the hook for?"*
+> *"When did I last talk to Joe, and about what?"*
+> *"What did Marissa and I decide about the trip?"*
+> *"Catch me up on the Reno group chat — what am I on the hook for?"*
 
 The usual price for that is uploading everything to someone else's
 cloud. ai-imessage refuses the trade. It indexes your Apple Messages
@@ -36,19 +36,6 @@ running entirely on the same machine:
   into Claude Desktop, Claude Code, Codex, and friends. That's a
   decision you make per client, not a default made for you.
 
-## Status
-
-All eight planned milestones are complete:
-
-- [x] **M1** Read-only extraction, typedstream decoding, `doctor`, `etl --dry-run`
-- [x] **M2** Normalized destination database, incremental ETL
-- [x] **M3** Conversation chunking + FTS5 keyword search
-- [x] **M4** Local embeddings + vector search
-- [x] **M5** Hybrid retrieval (rank fusion)
-- [x] **M6** MCP server
-- [x] **M7** Scheduled ETL (LaunchAgent)
-- [x] **M8** Homebrew release
-
 ## Install
 
 ```bash
@@ -71,7 +58,7 @@ ai-imessage doctor
 ```
 
 `doctor` will fail until your **terminal app** has Full Disk Access
-(System Settings → Privacy & Security → Full Disk Access) — macOS
+(System Settings → Privacy & Security → Full Disk Access) a good shortcut for this is Command+Space -> type 'full disk' -> click on 'Allow applications to access user files' -> find 'ai-imessage' and toggle on. — macOS
 requires it for anything that reads `~/Library/Messages/chat.db`. When
 all checks pass:
 
