@@ -254,7 +254,14 @@ cargo llvm-cov --summary-only   # coverage (cargo install cargo-llvm-cov)
 ```
 
 Tests run against synthetic Messages databases in `tests/common/` — no test
-ever touches a real `chat.db`. The typedstream parser is a clean-room
+ever touches a real `chat.db`.
+
+Releases are signed: `scripts/release.sh <version>` builds, signs with a
+Developer ID identity (hardened runtime + timestamp), optionally
+notarizes, and uploads the artifact. If you build from source and use the
+background agents, re-sign your binary with any stable identity after
+each rebuild (`codesign -f -s "<identity>" ~/.cargo/bin/ai-imessage`) so
+its Full Disk Access grant survives rebuilds. The typedstream parser is a clean-room
 implementation; do not copy code from GPL-licensed iMessage tooling into
 this repository.
 
